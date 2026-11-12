@@ -1,6 +1,14 @@
 import { convertResponsesStreamToJson } from "../../transformer/streamToJsonConverter.js";
 import { openAICompletionToClaudeMessage, openAICompletionToResponsesObject } from "./completionConverters.js";
+import { addBufferToUsage, attachRawUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
 import { detectEmptyCompletion, readCompletionShape, EMPTY_COMPLETION_STATUS } from "../../utils/emptyCompletion.js";
+
+function toBufferedClaudeMessage(responseBody) {
+  const message = openAICompletionToClaudeMessage(responseBody);
+  const rawUsage = message.usage;
+  message.usage = attachRawUsage(filterUsageForFormat(addBufferToUsage(rawUsage), FORMATS.CLAUDE), rawUsage, FORMATS.CLAUDE);
+  return message;
+}
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { FORMATS } from "../../translator/formats.js";
@@ -205,8 +213,8 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       // input_tokens EXCLUDES cached tokens on cache-capable upstreams, so summing
       // only input+output under-reports prompt_tokens. Fold cache counters in and
       // keep them visible in prompt_tokens_details (0.5.121 / upstream 41606a37).
-      const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || 0;
-      const cacheCreate = usage.cache_creation_input_tokens || 0;
+      const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || usage.input_tokens_details?.cached_tokens || 0;
+      const cacheCreate = usage.cache_creation_input_tokens || usage.input_tokens_details?.cache_creation_tokens || 0;
       const inTokens = (usage.input_tokens || 0) + cacheRead + cacheCreate;
       const outTokens = usage.output_tokens || 0;
       const cacheDetails = (cacheRead > 0 || cacheCreate > 0)
@@ -252,9 +260,17 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
-      // 0.5.166 — a Claude client gets a Claude message here too, as the chat branch
-      // below has since 0.5.163; this branch handed it a chat.completion (upstream 1d4335d4).
-      if (sourceFormat === FORMATS.CLAUDE) finalResp = openAICompletionToClaudeMessage(finalResp);
+      if (sourceFormat === FORMATS.CLAUDE) {
+        // Responses input_tokens already INCLUDES the nested cached_tokens.
+        // Preserve the legacy conversion for other clients, but do not fold
+        // that subset in twice when producing Anthropic's exclusive input.
+        finalResp.usage = {
+          prompt_tokens: usage.input_tokens || 0,
+          completion_tokens: usage.output_tokens || 0,
+          prompt_tokens_details: { cached_tokens: usage.input_tokens_details?.cached_tokens || cacheRead || 0 },
+        };
+        finalResp = toBufferedClaudeMessage(finalResp);
+      }
 
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
@@ -321,7 +337,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
     // Hand each client its own format; this used to return the chat.completion to
     // Claude and Responses clients too.
-    const clientBody = sourceFormat === FORMATS.CLAUDE ? openAICompletionToClaudeMessage(parsed)
+    const clientBody = sourceFormat === FORMATS.CLAUDE ? toBufferedClaudeMessage(parsed)
       : sourceFormat === FORMATS.OPENAI_RESPONSES ? openAICompletionToResponsesObject(parsed)
       : parsed;
     return { success: true, response: new Response(JSON.stringify(clientBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };

@@ -35,7 +35,9 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
     return createSSETransformStreamWithLogger(FORMATS.OPENAI_RESPONSES, codexTarget, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, cloakActive);
   }
 
-  if (needsTranslation(targetFormat, sourceFormat)) {
+  // Native Messages still need split-usage accumulation, raw billing counters,
+  // tool decloaking and message_stop (not the OpenAI passthrough [DONE] trailer).
+  if (sourceFormat === FORMATS.CLAUDE || needsTranslation(targetFormat, sourceFormat)) {
     return createSSETransformStreamWithLogger(targetFormat, sourceFormat, provider, reqLogger, toolNameMap, model, connectionId, body, onStreamComplete, apiKey, cloakActive);
   }
 

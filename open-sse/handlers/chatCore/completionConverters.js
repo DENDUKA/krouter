@@ -14,6 +14,20 @@ function parseToolArguments(value) {
 // and the forced-stream SSE->JSON handler (which used to hand every client the raw
 // chat.completion). Kept apart so the two handlers do not import each other.
 
+const n = (v) => (typeof v === "number" ? v : 0);
+
+export function openAIUsageToClaude(raw = {}) {
+  const cacheRead = n(raw.prompt_tokens_details?.cached_tokens ?? raw.cached_tokens ?? raw.prompt_cache_hit_tokens);
+  const cacheCreation = n(raw.prompt_tokens_details?.cache_creation_tokens);
+  return {
+    input_tokens: Math.max(0, n(raw.prompt_tokens ?? raw.input_tokens) - cacheRead - cacheCreation),
+    output_tokens: n(raw.completion_tokens ?? raw.output_tokens),
+    cache_read_input_tokens: cacheRead,
+    cache_creation_input_tokens: cacheCreation,
+    ...(raw.estimated !== undefined ? { estimated: raw.estimated } : {}),
+  };
+}
+
 /**
  * Convert an OpenAI chat.completion body into a Claude message body.
  *
@@ -45,6 +59,16 @@ export function openAICompletionToClaudeMessage(responseBody) {
   if (content.length === 0) content.push({ type: "text", text: "" });
 
   const usage = responseBody.usage || {};
+  const rawUsage = usage.input_tokens !== undefined && usage.prompt_tokens === undefined
+    ? {
+        input_tokens: usage.input_tokens,
+        output_tokens: usage.output_tokens || 0,
+        cache_read_input_tokens: usage.cache_read_input_tokens || 0,
+        cache_creation_input_tokens: usage.cache_creation_input_tokens || 0,
+        ...(usage.estimated !== undefined ? { estimated: usage.estimated } : {}),
+      }
+    : openAIUsageToClaude(usage);
+
   return {
     id: String(responseBody.id || `msg_${Date.now()}`).replace(/^chatcmpl-/, ""),
     type: "message",
@@ -53,10 +77,7 @@ export function openAICompletionToClaudeMessage(responseBody) {
     content,
     stop_reason: convertFinishReason(choice.finish_reason),
     stop_sequence: null,
-    usage: {
-      input_tokens: usage.prompt_tokens || usage.input_tokens || 0,
-      output_tokens: usage.completion_tokens || usage.output_tokens || 0,
-    },
+    usage: rawUsage,
   };
 }
 

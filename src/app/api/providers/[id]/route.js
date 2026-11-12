@@ -5,6 +5,7 @@ import {
   updateProviderConnection,
   deleteProviderConnection,
 } from "@/models";
+import { invalidateProviderQuotaCache } from "@/lib/integrations/providerQuotaCache";
 
 function normalizeProxyConfig(body = {}) {
   const hasAnyProxyField =
@@ -57,6 +58,10 @@ async function normalizeProxyPoolUpdate(proxyPoolIdInput) {
 
 function shouldMergeProviderSpecificData(existing, incoming, hasLegacyProxy, hasProxyPoolField) {
   return existing !== undefined || incoming !== undefined || hasLegacyProxy || hasProxyPoolField;
+}
+
+function isEnabled(value) {
+  return value === true || value === 1;
 }
 
 // GET /api/providers/[id] - Get single connection
@@ -158,6 +163,10 @@ export async function PUT(request, { params }) {
     // 0.5.166 — the edit dialog sends testStatus "active" only after the new key
     // validated: drop the old key's stale locks/backoff with it (upstream 7fee56ba).
     const updated = await updateProviderConnection(id, updateData, { reactivate: updateData.testStatus === "active" });
+
+    if (isActive !== undefined && updated && isEnabled(updated.isActive) !== isEnabled(existing.isActive)) {
+      invalidateProviderQuotaCache();
+    }
 
     // Hide sensitive fields
     const result = { ...updated };

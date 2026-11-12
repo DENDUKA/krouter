@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getSettings, validateApiKey } from "@/lib/localDb";
 import { CLI_TOKEN_HEADER, hasValidCliToken } from "@/lib/auth/cliToken";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { validateRouterControlToken } from "@/lib/auth/routerControlToken";
 import { checkApiAuthLock, recordApiAuthFail, recordApiAuthSuccess } from "@/lib/auth/apiAuthLimiter";
 import { getClientIp } from "@/lib/auth/loginLimiter";
 
@@ -91,6 +92,10 @@ const LOCAL_ONLY_PATHS = [
   "/api/oauth/kiro/auto-import",
   "/api/auth/reset-password",
 ];
+
+function resolveRouterControlToken(settings) {
+  return settings?.routerControlToken || process.env.ROUTER_CONTROL_TOKEN || "";
+}
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -315,6 +320,26 @@ export async function proxy(request) {
     return NextResponse.json({ error: process.env.REQUIRE_API_KEY === "true"
           ? "API key required (REQUIRE_API_KEY is enabled)"
           : "API key required for remote API access" }, { status: 401 });
+  }
+
+  // Service-to-service auth for /api/integrations/* — router control token only.
+  // Dashboard cookie, requireLogin=false, and CLI token do NOT grant access.
+  if (pathname.startsWith("/api/integrations/")) {
+    const settings = await loadSettings();
+    const { valid, configured } = validateRouterControlToken(
+      request,
+      resolveRouterControlToken(settings),
+    );
+    if (!configured) {
+      return NextResponse.json(
+        { error: "Router control token is not configured" },
+        { status: 503 },
+      );
+    }
+    if (!valid) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+    return NextResponse.next();
   }
 
   // Deny-by-default for /api/* — public allow-list bypasses, everything else requires auth.

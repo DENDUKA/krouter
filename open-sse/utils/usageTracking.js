@@ -54,6 +54,73 @@ export function addBufferToUsage(usage) {
   return result;
 }
 
+/**
+ * Attach unbuffered raw token counters under `_orr_raw` for billing while
+ * standard `usage` keeps the +BUFFER_TOKENS safety margin for CLI context tracking.
+ * Must be called AFTER filterUsageForFormat so the private field survives filtering.
+ */
+export function attachRawUsage(buffered, raw, targetFormat = null) {
+  if (!buffered || typeof buffered !== "object" || !raw || typeof raw !== "object") {
+    return buffered;
+  }
+  if (targetFormat === FORMATS.CLAUDE) {
+    return {
+      ...buffered,
+      _orr_raw: {
+        input_tokens: Number(raw.input_tokens) || 0,
+        output_tokens: Number(raw.output_tokens) || 0,
+        cache_read_input_tokens: Number(raw.cache_read_input_tokens) || 0,
+        cache_creation_input_tokens: Number(raw.cache_creation_input_tokens) || 0,
+      },
+    };
+  }
+  const promptTokens = raw.prompt_tokens ?? raw.input_tokens ?? raw.promptTokenCount;
+  const completionTokens = raw.completion_tokens ?? raw.output_tokens ?? raw.candidatesTokenCount;
+  if (promptTokens == null && completionTokens == null) return buffered;
+  return {
+    ...buffered,
+    _orr_raw: {
+      prompt_tokens: Number(promptTokens) || 0,
+      completion_tokens: Number(completionTokens) || 0,
+    },
+  };
+}
+
+/**
+ * Normalize Claude cache fields into OpenAI prompt_tokens_details so they survive
+ * filterUsageForFormat(OPENAI) and satisfy the "prompt_tokens includes cached_tokens"
+ * invariant OpenAI clients expect. Returns a NEW object and leaves the input untouched
+ * (the raw object is still used for native per-account logging, which tracks read vs
+ * creation separately). No-op when there are no Claude cache fields.
+ */
+export function foldClaudeCacheToOpenAI(usage) {
+  if (!usage || typeof usage !== "object") return usage;
+
+  const cacheRead = usage.cache_read_input_tokens || 0;
+  const cacheCreation = usage.cache_creation_input_tokens || 0;
+  if (cacheRead === 0 && cacheCreation === 0) return usage;
+
+  const result = { ...usage };
+  delete result.cache_read_input_tokens;
+  delete result.cache_creation_input_tokens;
+
+  const baseInput = (typeof result.input_tokens === "number")
+    ? result.input_tokens
+    : (result.prompt_tokens || 0);
+  delete result.input_tokens;
+  delete result.output_tokens;
+
+  result.prompt_tokens = baseInput + cacheRead + cacheCreation;
+  result.total_tokens = result.prompt_tokens + (result.completion_tokens || 0);
+
+  const details = { ...(result.prompt_tokens_details || {}) };
+  if (cacheRead > 0) details.cached_tokens = cacheRead;
+  if (cacheCreation > 0) details.cache_creation_tokens = cacheCreation;
+  result.prompt_tokens_details = details;
+
+  return result;
+}
+
 export function filterUsageForFormat(usage, targetFormat) {
   if (!usage || typeof usage !== "object") return usage;
 
@@ -154,6 +221,7 @@ export function hasValidUsage(usage) {
   const tokenFields = [
     "prompt_tokens", "completion_tokens", "total_tokens",  // OpenAI
     "input_tokens", "output_tokens",                        // Claude
+    "cache_read_input_tokens", "cache_creation_input_tokens", // cache-only Claude input
     "promptTokenCount", "candidatesTokenCount"              // Gemini
   ];
 

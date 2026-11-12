@@ -2,13 +2,15 @@ name: Build and Push Docker Image
 
 on:
   push:
+    branches:
+      - kRouterFork
+      - main
     tags:
       - "v*"
   workflow_dispatch:
 
 env:
   GHCR_IMAGE: ghcr.io/${{ github.repository }}
-  DOCKERHUB_IMAGE: sifxprime/krouter
 
 jobs:
   build-and-push:
@@ -16,7 +18,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      issues: write # open an issue if a release build fails
 
     steps:
       - uses: actions/checkout@v4
@@ -30,22 +31,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.GHCR_IMAGE }}
-            ${{ env.DOCKERHUB_IMAGE }}
+          images: ${{ env.GHCR_IMAGE }}
           tags: |
             type=semver,pattern={{version}}
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=dev-latest,enable=${{ github.ref == 'refs/heads/kRouterFork' }}
+            type=sha,format=short
+            type=ref,event=branch
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -54,81 +50,6 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # No build cache. The old one was a :buildcache tag in this GHCR package --
-          # the newest tag, so GHCR's page told people to pull it, and it is not a
-          # runnable image. GitHub's Actions cache cannot help either: entries are
-          # scoped to the tag that wrote them, and this workflow only runs on tags.
-          # Little was reused anyway: every release bumps package.json, which
-          # invalidates npm ci and the build; only the apk layer was ever a hit.
           platforms: linux/amd64,linux/arm64
           provenance: false
           sbom: false
-
-      # Docker Hub showed 6,459 pulls against an empty description. The npm README
-      # is reused because its links are already absolute, minus the line telling
-      # readers they are on npm. Non-fatal: a token scope problem here must not mark
-      # an otherwise successful image push as failed.
-      - name: Prepare Docker Hub README
-        run: |
-          node -e '
-            const fs = require("fs");
-            const src = fs.readFileSync("cli/README.md", "utf8");
-            const out = src.replace(
-              /^> \*\*You.re viewing this on npm\.\*\*.*$/m,
-              "> **You\u2019re viewing this on Docker Hub.** Full docs, screenshots, and changelog: [github.com/sifxprime/krouter](https://github.com/sifxprime/krouter)."
-            );
-            fs.writeFileSync("dockerhub-readme.md", out);
-          '
-
-      - name: Update Docker Hub description
-        continue-on-error: true
-        uses: peter-evans/dockerhub-description@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DOCKERHUB_IMAGE }}
-          short-description: "Self-hosted AI gateway for Claude Code, Cursor, Codex & Copilot. 40+ providers, one endpoint."
-          readme-filepath: ./dockerhub-readme.md
-
-      # v0.5.158, v0.5.159 and v0.5.160 all failed here and nobody noticed for
-      # weeks, because a tag-triggered workflow is one nobody is watching. An open
-      # issue is hard to miss.
-      - name: Open an issue if the release build failed
-        if: failure() && github.ref_type == 'tag'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh issue create --repo "${{ github.repository }}" \
-            --title "Docker image build failed for ${{ github.ref_name }}" \
-            --label bug \
-            --body "The Docker image for **${{ github.ref_name }}** did not build or push, so Docker Hub and GHCR still serve the previous image. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-
-  github-release:
-    # Independent of the image build: a Docker failure should not also withhold the
-    # release notes from people installing through npm.
-    if: github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v5
-
-      # 75 tags existed with zero GitHub Releases, so the repo sidebar read
-      # "0 releases" next to 130 npm versions. Notes come from CHANGELOG.md, which is
-      # written for humans; generated notes are the fallback.
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists"; exit 0
-          fi
-          # The script unwraps CHANGELOG.md's hard-wrapped prose: release bodies render
-          # a single newline as <br>, which made v0.5.161's notes ragged.
-          if node scripts/release-notes.js "$TAG" > notes.md; then
-            gh release create "$TAG" --title "$(node scripts/release-notes.js "$TAG" --title)" \
-              --notes-file notes.md --latest
-          else
-            gh release create "$TAG" --title "$TAG" --generate-notes --latest
-          fi

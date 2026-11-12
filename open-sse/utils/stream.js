@@ -2,7 +2,8 @@ import { translateResponse, initState } from "../translator/index.js";
 import { clientWantsDoneSentinel } from "./sseConstants.js";
 import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
-import { extractUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
+import { extractUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, attachRawUsage, foldClaudeCacheToOpenAI, COLORS } from "./usageTracking.js";
+import { openAIUsageToClaude } from "../handlers/chatCore/completionConverters.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
@@ -96,7 +97,59 @@ export function createSSEStream(options = {}) {
   // client registers OPENAI -> ANTIGRAVITY: from=targetFormat, to=sourceFormat.
   // Guarding on targetFormat looked right, passed a test that repeated the same
   // inversion, shipped, and changed nothing -- the sentinel kept going out.
-  const omitsDoneSentinel = !clientWantsDoneSentinel(sourceFormat);
+  const omitsDoneSentinel = !clientWantsDoneSentinel(sourceFormat) || sourceFormat === FORMATS.CLAUDE;
+
+  let claudeUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
+  let claudeUsageSeen = false;
+  let pendingClaudeTerminal = [];
+
+  // Only terminal events may wait for an OpenAI usage-only trailer. Content and
+  // tools still stream immediately; never emit message_stop before final usage.
+  const emitTranslated = (item, controller, terminalReady = false) => {
+    if (sourceFormat === FORMATS.CLAUDE) {
+      if (item.type === "error") pendingClaudeTerminal = [];
+      const terminal = item.type === "message_stop" || (item.type === "message_delta" && item.delta?.stop_reason);
+      if (!terminalReady && targetFormat !== FORMATS.CLAUDE &&
+          (pendingClaudeTerminal.length > 0 || (terminal && (targetFormat === FORMATS.OPENAI || !hasValidUsage(state?.usage))))) {
+        pendingClaudeTerminal.push(item);
+        return;
+      }
+
+      const start = item.type === "message_start";
+      const itemUsage = start ? item.message?.usage : item.type === "message_delta" ? item.usage : null;
+      if (itemUsage && typeof itemUsage === "object") {
+        claudeUsageSeen = true;
+        // message_delta is cumulative, and missing fields retain message_start
+        // values. Explicit zeros must replace placeholders, not max-merge them.
+        claudeUsage = { ...claudeUsage, ...itemUsage };
+        const clientUsage = attachRawUsage(
+          filterUsageForFormat(addBufferToUsage(claudeUsage), FORMATS.CLAUDE),
+          claudeUsage, FORMATS.CLAUDE);
+        item = start ? { ...item, message: { ...item.message, usage: clientUsage } } : { ...item, usage: clientUsage };
+      }
+    }
+    const output = formatSSE(item, sourceFormat);
+    reqLogger?.appendConvertedChunk?.(output);
+    controller.enqueue(sharedEncoder.encode(output));
+    sseEmittedCount++;
+    if (sourceFormat === FORMATS.CLAUDE && item.type === "message_stop") finalizeStream();
+  };
+
+  const flushClaudeTerminal = (controller) => {
+    if (pendingClaudeTerminal.length === 0) return;
+    let finalUsage = state?.usage;
+    if (finalUsage == null && totalContentLength > 0) {
+      finalUsage = estimateUsage(body, totalContentLength, FORMATS.CLAUDE);
+      if (state) state.usage = finalUsage;
+    }
+    const nativeUsage = finalUsage?.input_tokens !== undefined
+      ? finalUsage : openAIUsageToClaude(finalUsage || {});
+    const terminal = pendingClaudeTerminal;
+    pendingClaudeTerminal = [];
+    for (const item of terminal) {
+      emitTranslated(item.type === "message_delta" ? { ...item, usage: nativeUsage } : item, controller, true);
+    }
+  };
 
   // The Responses API has no [DONE] sentinel. Codex closes the socket the moment it
   // sees the terminal event, which cancels the reader -- so flush() never runs and the
@@ -109,9 +162,11 @@ export function createSSEStream(options = {}) {
     finalized = true;
 
     const isPassthrough = mode === STREAM_MODE.PASSTHROUGH;
-    let finalUsage = isPassthrough ? usage : state?.usage;
+    const nativeClaudeUsage = sourceFormat === FORMATS.CLAUDE && targetFormat === FORMATS.CLAUDE && claudeUsageSeen;
+    let finalUsage = nativeClaudeUsage ? claudeUsage : isPassthrough ? usage : state?.usage;
 
-    if (!hasValidUsage(finalUsage) && totalContentLength > 0) {
+    const explicitClaudeUsage = sourceFormat === FORMATS.CLAUDE && finalUsage != null;
+    if (!explicitClaudeUsage && !hasValidUsage(finalUsage) && totalContentLength > 0) {
       finalUsage = estimateUsage(body, totalContentLength, isPassthrough ? FORMATS.OPENAI : sourceFormat);
       if (isPassthrough) usage = finalUsage;
       else if (state) state.usage = finalUsage;
@@ -271,6 +326,10 @@ export function createSSEStream(options = {}) {
 
         // Translate mode
         if (!trimmed) continue;
+        if (sourceFormat === FORMATS.CLAUDE && targetFormat === FORMATS.CLAUDE && trimmed.startsWith(":")) {
+          controller.enqueue(sharedEncoder.encode(line + "\n\n"));
+          continue;
+        }
 
         const parsed = parseSSELine(trimmed, targetFormat);
         if (!parsed) continue;
@@ -289,6 +348,7 @@ export function createSSEStream(options = {}) {
         // For Ollama: done=true is the final chunk with finish_reason/usage, must translate
         // For other formats: done=true is the [DONE] sentinel, skip
         if (parsed && parsed.done && targetFormat !== FORMATS.OLLAMA) {
+          flushClaudeTerminal(controller);
           // 0.5.166 — [DONE] ends the wait for a usage trailer even if the upstream holds
           // the connection open: complete before the sentinel (upstream 7111db35).
           if (defersResponsesCompletion && state.completionPending && !state.completedSent) {
@@ -385,28 +445,30 @@ export function createSSEStream(options = {}) {
           for (const item of translated) {
             if (item === null || item === undefined) continue;
             // Filter empty chunks
-            if (!hasValuableContent(item, sourceFormat)) {
+            if (sourceFormat !== FORMATS.CLAUDE && !hasValuableContent(item, sourceFormat)) {
               continue; // Skip this empty chunk
             }
 
             // Inject estimated usage if finish chunk has no valid usage
             const isFinishChunk = item.type === "message_delta" || item.choices?.[0]?.finish_reason;
-            if (state.finishReason && isFinishChunk && !hasValidUsage(item.usage) && totalContentLength > 0) {
+            if (sourceFormat !== FORMATS.CLAUDE && state.finishReason && isFinishChunk && !hasValidUsage(item.usage) && totalContentLength > 0) {
               const estimated = estimateUsage(body, totalContentLength, sourceFormat);
-              item.usage = filterUsageForFormat(estimated, sourceFormat); // Filter + already has buffer
+              // Buffer only the client-facing copy; keep state.usage raw for logging.
+              item.usage = attachRawUsage(filterUsageForFormat(addBufferToUsage(estimated), sourceFormat), estimated);
               state.usage = estimated;
-            } else if (state.finishReason && isFinishChunk && state.usage) {
-              // Add buffer and filter usage for client (but keep original in state.usage for logging)
-              const buffered = addBufferToUsage(state.usage);
-              item.usage = filterUsageForFormat(buffered, sourceFormat);
+            } else if (sourceFormat !== FORMATS.CLAUDE && state.finishReason && isFinishChunk && state.usage) {
+              const normalized = sourceFormat === FORMATS.OPENAI ? foldClaudeCacheToOpenAI(state.usage) : state.usage;
+              const buffered = addBufferToUsage(normalized);
+              item.usage = attachRawUsage(filterUsageForFormat(buffered, sourceFormat), normalized);
             }
 
-            const output = formatSSE(item, sourceFormat);
-            reqLogger?.appendConvertedChunk?.(output);
-            controller.enqueue(sharedEncoder.encode(output));
-            sseEmittedCount++;
+            emitTranslated(item, controller);
           }
         }
+
+        const usageTrailer = parsed.usage && !parsed.choices?.[0];
+        if (pendingClaudeTerminal.length > 0 && state.usage != null &&
+            (targetFormat !== FORMATS.OPENAI || usageTrailer)) flushClaudeTerminal(controller);
 
         // 0.5.166 — a translated Responses stream just sent response.completed. Codex
         // closes the socket on it, which cancels the reader so flush() never bills the
@@ -486,9 +548,7 @@ export function createSSEStream(options = {}) {
             if (translated?.length > 0) {
               for (const item of translated) {
                 if (item === null || item === undefined) continue;
-                const output = formatSSE(item, sourceFormat);
-                reqLogger?.appendConvertedChunk?.(output);
-                controller.enqueue(sharedEncoder.encode(output));
+                emitTranslated(item, controller);
               }
             }
           }
@@ -506,11 +566,11 @@ export function createSSEStream(options = {}) {
         if (flushed?.length > 0) {
           for (const item of flushed) {
             if (item === null || item === undefined) continue;
-            const output = formatSSE(item, sourceFormat);
-            reqLogger?.appendConvertedChunk?.(output);
-            controller.enqueue(sharedEncoder.encode(output));
+            emitTranslated(item, controller);
           }
         }
+
+        flushClaudeTerminal(controller);
 
         // Synthesize response.failed if a Responses passthrough stream never reached a terminal event
         const keepsOpenAIResponsesFormat = targetFormat === FORMATS.OPENAI_RESPONSES && sourceFormat === FORMATS.OPENAI_RESPONSES;

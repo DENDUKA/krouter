@@ -3,7 +3,7 @@ import { geminiFinishReasonToOpenAI } from "../../utils/geminiFinishReason.js";
 import { needsTranslation } from "../../translator/index.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { convertStopReason, refusalExplanation } from "../../translator/response/claude-to-openai.js";
-import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
+import { addBufferToUsage, filterUsageForFormat, attachRawUsage } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
 import { HTTP_STATUS } from "../../config/runtimeConfig.js";
 import { parseSSEToOpenAIResponse, streamErrorStatus } from "./sseToJsonHandler.js";
@@ -142,10 +142,13 @@ function translateForClientFormat(responseBody, targetFormat, sourceFormat) {
 
     if (usage) {
       result.usage = {
-        prompt_tokens: (usage.promptTokenCount || 0) + (usage.thoughtsTokenCount || 0),
-        completion_tokens: usage.candidatesTokenCount || 0,
+        prompt_tokens: usage.promptTokenCount || 0,
+        completion_tokens: (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0),
         total_tokens: usage.totalTokenCount || 0
       };
+      if (usage.cachedContentTokenCount > 0) {
+        result.usage.prompt_tokens_details = { cached_tokens: usage.cachedContentTokenCount };
+      }
       if (usage.thoughtsTokenCount > 0) {
         result.usage.completion_tokens_details = { reasoning_tokens: usage.thoughtsTokenCount };
       }
@@ -223,7 +226,8 @@ function translateForClientFormat(responseBody, targetFormat, sourceFormat) {
 
   // Ollama
   if (targetFormat === FORMATS.OLLAMA) {
-    return ollamaBodyToOpenAI(responseBody);
+    const result = ollamaBodyToOpenAI(responseBody);
+    return sourceFormat === FORMATS.CLAUDE ? openAICompletionToClaudeMessage(result) : result;
   }
 
   return responseBody;
@@ -331,7 +335,8 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   if (translatedResponse?.usage) {
-    translatedResponse.usage = filterUsageForFormat(addBufferToUsage(translatedResponse.usage), sourceFormat);
+    const rawUsage = translatedResponse.usage;
+    translatedResponse.usage = attachRawUsage(filterUsageForFormat(addBufferToUsage(rawUsage), sourceFormat), rawUsage, sourceFormat);
   }
 
   // Strip reasoning_content only when content is non-empty.
