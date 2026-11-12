@@ -323,3 +323,89 @@ function containsTagInText(text) {
   return text.includes("<thinking_mode>enabled</thinking_mode>")
     || text.includes("<thinking_mode>interleaved</thinking_mode>");
 }
+
+function parseClaudeVersion(model) {
+  if (typeof model !== "string") return null;
+  const normalized = model.toLowerCase().replace(/-/g, ".");
+  const match = normalized.match(/(?:^|[/.])claude(?:[/.][a-z]+)*[/.](\d+)(?:[/.](\d+))?(?:[/.]|$)/);
+  if (!match) return null;
+  return { major: Number(match[1]), minor: match[2] === undefined ? null : Number(match[2]) };
+}
+
+function kiroModelLacksXhigh(model) {
+  const v = parseClaudeVersion(model);
+  return !v || (v.major === 4 && v.minor !== null && v.minor <= 6);
+}
+
+export function extractKiroEffortLevel(body, model) {
+  const effort =
+    body?.output_config?.effort ??
+    body?.reasoning_effort ??
+    (typeof body?.reasoning === "object" ? body.reasoning?.effort : null);
+  if (typeof effort !== "string") return null;
+  const normalized = effort.toLowerCase();
+  if (normalized === "none" || normalized === "off" || normalized === "disabled") return null;
+  if (normalized === "xhigh") return kiroModelLacksXhigh(model) ? "high" : "xhigh";
+  if (normalized === "max") return "max";
+  if (["low", "medium", "high"].includes(normalized)) return normalized;
+  return null;
+}
+
+function extractKiroGptEffortLevel(body) {
+  const effort =
+    body?.output_config?.effort ??
+    body?.reasoning_effort ??
+    (typeof body?.reasoning === "object" ? body.reasoning?.effort : null);
+  if (typeof effort !== "string") return null;
+  const normalized = effort.toLowerCase();
+  if (normalized === "max") return "xhigh";
+  if (["low", "medium", "high", "xhigh"].includes(normalized)) {
+    return normalized;
+  }
+  return null;
+}
+
+export function buildKiroAdditionalModelRequestFields(body, effortPath = "output_config", model) {
+  const effort = effortPath === "reasoning"
+    ? extractKiroGptEffortLevel(body)
+    : extractKiroEffortLevel(body, model);
+  if (!effort) return undefined;
+  if (effortPath === "reasoning") {
+    return { reasoning: { effort } };
+  }
+  return {
+    thinking: { type: "adaptive", display: "summarized" },
+    output_config: { effort },
+  };
+}
+
+export function resolveKiroEffortPath(model) {
+  if (typeof model !== "string") return null;
+  const normalized = model.toLowerCase().replace(/-/g, ".");
+  if (/(?:^|[/.])gpt[/.]5[/.]6(?:[/.]|$)/.test(normalized)) {
+    return "reasoning";
+  }
+  if (!normalized.includes("claude")) return null;
+  const v = parseClaudeVersion(model);
+  if (!v) return null;
+  const { major, minor } = v;
+  const dateSuffixMinor = minor !== null && minor >= 1000;
+  return major < 4 || (major === 4 && (minor === null || minor <= 5 || dateSuffixMinor))
+    ? null
+    : "output_config";
+}
+
+export function supportsKiroAdditionalModelRequestFields(model) {
+  return resolveKiroEffortPath(model) !== null;
+}
+
+export function usesKiroNativeGptEffort(body, model) {
+  return resolveKiroEffortPath(model) === "reasoning"
+    && extractKiroGptEffortLevel(body) !== null;
+}
+
+export function buildKiroAdditionalModelRequestFieldsForModel(body, model) {
+  const effortPath = resolveKiroEffortPath(model);
+  if (!effortPath) return undefined;
+  return buildKiroAdditionalModelRequestFields(body, effortPath, model);
+}

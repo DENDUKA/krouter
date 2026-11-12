@@ -520,6 +520,183 @@ const PROVIDER_MODELS_CONFIG = {
   }
 };
 
+export async function fetchProviderModelsForConnection(connection) {
+  if (!connection) {
+    return { error: "Connection not found", status: 404 };
+  }
+
+  const isNoAuthId = AI_PROVIDERS[connection.provider || connection.id]?.noAuth === true;
+  const effectiveProvider = isNoAuthId ? (connection.provider || connection.id) : connection.provider;
+  const id = connection.id;
+
+  if (isOpenAICompatibleProvider(effectiveProvider)) {
+    const baseUrl = connection?.providerSpecificData?.baseUrl;
+    if (!baseUrl) {
+      return { error: "No base URL configured for OpenAI compatible provider", status: 400 };
+    }
+    try { assertSafeBaseUrl(baseUrl); }
+    catch (e) { return { error: e.message, status: 400 }; }
+    const url = `${baseUrl.replace(/\/$/, "")}/models`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${connection.apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log(`Error fetching models from ${connection.provider}:`, errorText);
+      return {
+        error: `Failed to fetch models: ${response.status}`,
+        status: response.status
+      };
+    }
+
+    const data = await response.json();
+    const models = normalizeModels(data.data || data.models || data.results || data || []);
+
+    return {
+      provider: effectiveProvider,
+      connectionId: connection?.id || id,
+      models
+    };
+  }
+
+  if (isAnthropicCompatibleProvider(effectiveProvider)) {
+    let baseUrl = connection?.providerSpecificData?.baseUrl;
+    if (!baseUrl) {
+      return { error: "No base URL configured for Anthropic compatible provider", status: 400 };
+    }
+    try { assertSafeBaseUrl(baseUrl); }
+    catch (e) { return { error: e.message, status: 400 }; }
+
+    baseUrl = baseUrl.replace(/\/$/, "");
+    if (baseUrl.endsWith("/messages")) {
+      baseUrl = baseUrl.slice(0, -9);
+    }
+
+    const url = `${baseUrl}/models`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": connection?.apiKey || "",
+        "anthropic-version": "2023-06-01",
+        "Authorization": `Bearer ${connection?.apiKey || ""}`
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.log(`Error fetching models from ${effectiveProvider}:`, errorText);
+      return {
+        error: `Failed to fetch models: ${response.status}`,
+        status: response.status
+      };
+    }
+
+    const data = await response.json();
+    const models = normalizeModels(data.data || data.models || data.results || data || []);
+
+    return {
+      provider: effectiveProvider,
+      connectionId: connection?.id || id,
+      models
+    };
+  }
+
+  const config = PROVIDER_MODELS_CONFIG[effectiveProvider];
+  if (!config) {
+    return {
+      error: `Provider ${effectiveProvider} does not support models listing`,
+      status: 400
+    };
+  }
+
+  // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
+  if (typeof config.customResolver === "function") {
+    const result = await config.customResolver(connection);
+    if (result.error) {
+      return { error: result.error, status: result.status || 500 };
+    }
+    return {
+      provider: connection.provider,
+      connectionId: connection.id,
+      models: normalizeModels(result.models),
+      ...(result.warning ? { warning: result.warning } : {})
+    };
+  }
+
+  // Get auth token (if auth required)
+  let token = null;
+  if (!isNoAuthId) {
+    token = connection?.providerSpecificData?.copilotToken || connection?.accessToken || connection?.apiKey;
+    if (!token && !config.authType === "none" && !config.noAuth) {
+      return { error: "No valid token found", status: 401 };
+    }
+  }
+
+  // Build request URL
+  let url = config.url;
+  if (effectiveProvider === "qwen") {
+    url = resolveQwenModelsUrl(connection);
+  } else if (effectiveProvider === "ollama-local") {
+    const baseUrl = connection?.providerSpecificData?.baseUrl;
+    if (!baseUrl) return { error: "No Ollama base URL configured", status: 400 };
+    url = `${baseUrl.replace(/\/$/, "")}/api/tags`;
+  }
+
+  if (config.authQuery && token) {
+    url += `?${config.authQuery}=${token}`;
+  }
+
+  // Build headers — include the MITM anti-loop header so when this dev/
+  // runtime process makes the call AND the user has MITM intercept enabled
+  // for the upstream hostname (e.g. api.anthropic.com via Claude Desktop
+  // MITM), our own outbound fetch doesn't hit our own MITM and get a
+  // SELF_SIGNED_CERT_IN_CHAIN error. MITM checks this header first and
+  // passthroughs to the real upstream.
+  const headers = { ...config.headers, "x-request-source": "local" };
+  if (config.authHeader && !config.authQuery && token) {
+    headers[config.authHeader] = (config.authPrefix || "") + token;
+  }
+
+  // Make request
+  const fetchOptions = {
+    method: config.method,
+    headers
+  };
+
+  if (config.body && config.method === "POST") {
+    fetchOptions.body = JSON.stringify(config.body);
+  }
+
+  const response = await fetch(url, fetchOptions);
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    const compact = typeof errorText === "string"
+      ? errorText.replace(/\s+/g, " ").slice(0, 200)
+      : "";
+    console.log(`Error fetching models from ${effectiveProvider} [${response.status}]: ${compact}`);
+    return {
+      error: `Failed to fetch models: ${response.status}`,
+      status: response.status
+    };
+  }
+
+  const data = await response.json();
+  const models = normalizeModels(config.parseResponse(data));
+
+  return {
+    provider: effectiveProvider,
+    connectionId: connection?.id || id,
+    models
+  };
+}
+
 /**
  * GET /api/providers/[id]/models - Get models list from provider
  */
@@ -530,7 +707,6 @@ export async function GET(request, { params }) {
     // Check if the requested ID is actually a no-auth provider ID instead of a connection ID.
     // Dashboard passes providerId directly for no-auth providers since they have no connections.
     const isNoAuthId = AI_PROVIDERS[id]?.noAuth === true;
-    const providerId = isNoAuthId ? id : null;
 
     let connection = null;
     if (!isNoAuthId) {
@@ -538,179 +714,16 @@ export async function GET(request, { params }) {
       if (!connection) {
         return NextResponse.json({ error: "Connection not found" }, { status: 404 });
       }
+    } else {
+      connection = { provider: id, id };
     }
 
-    const effectiveProvider = providerId || connection.provider;
-
-    if (isOpenAICompatibleProvider(effectiveProvider)) {
-      const baseUrl = connection?.providerSpecificData?.baseUrl;
-      if (!baseUrl) {
-        return NextResponse.json({ error: "No base URL configured for OpenAI compatible provider" }, { status: 400 });
-      }
-      try { assertSafeBaseUrl(baseUrl); }
-      catch (e) { return NextResponse.json({ error: e.message }, { status: 400 }); }
-      const url = `${baseUrl.replace(/\/$/, "")}/models`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${connection.apiKey}`,
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${connection.provider}:`, errorText);
-        return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
-          { status: response.status }
-        );
-      }
-
-      const data = await response.json();
-      const models = normalizeModels(data.data || data.models || data.results || data || []);
-
-      return NextResponse.json({
-        provider: effectiveProvider,
-        connectionId: connection?.id || id,
-        models
-      });
+    const result = await fetchProviderModelsForConnection(connection);
+    if (result.error) {
+      return NextResponse.json({ error: result.error }, { status: result.status || 500 });
     }
 
-    if (isAnthropicCompatibleProvider(effectiveProvider)) {
-      let baseUrl = connection?.providerSpecificData?.baseUrl;
-      if (!baseUrl) {
-        return NextResponse.json({ error: "No base URL configured for Anthropic compatible provider" }, { status: 400 });
-      }
-      try { assertSafeBaseUrl(baseUrl); }
-      catch (e) { return NextResponse.json({ error: e.message }, { status: 400 }); }
-
-      baseUrl = baseUrl.replace(/\/$/, "");
-      if (baseUrl.endsWith("/messages")) {
-        baseUrl = baseUrl.slice(0, -9);
-      }
-
-      const url = `${baseUrl}/models`;
-      const response = await fetch(url, {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": connection?.apiKey || "",
-          "anthropic-version": "2023-06-01",
-          "Authorization": `Bearer ${connection?.apiKey || ""}`
-        },
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.log(`Error fetching models from ${effectiveProvider}:`, errorText);
-        return NextResponse.json(
-          { error: `Failed to fetch models: ${response.status}` },
-          { status: response.status }
-        );
-      }
-
-      const data = await response.json();
-      const models = normalizeModels(data.data || data.models || data.results || data || []);
-
-      return NextResponse.json({
-        provider: effectiveProvider,
-        connectionId: connection?.id || id,
-        models
-      });
-    }
-
-    const config = PROVIDER_MODELS_CONFIG[effectiveProvider];
-    if (!config) {
-      return NextResponse.json(
-        { error: `Provider ${connection.provider} does not support models listing` },
-        { status: 400 }
-      );
-    }
-
-    // Config-driven custom resolver path (OAuth refresh, non-OpenAI shape, etc.)
-    if (typeof config.customResolver === "function") {
-      const result = await config.customResolver(connection);
-      if (result.error) {
-        return NextResponse.json({ error: result.error }, { status: result.status || 500 });
-      }
-      return NextResponse.json({
-        provider: connection.provider,
-        connectionId: connection.id,
-        models: normalizeModels(result.models),
-        ...(result.warning ? { warning: result.warning } : {})
-      });
-    }
-
-    // Get auth token (if auth required)
-    let token = null;
-    if (!isNoAuthId) {
-      token = connection?.providerSpecificData?.copilotToken || connection?.accessToken || connection?.apiKey;
-      if (!token && !config.authType === "none" && !config.noAuth) {
-        return NextResponse.json({ error: "No valid token found" }, { status: 401 });
-      }
-    }
-
-    // Build request URL
-    let url = config.url;
-    if (effectiveProvider === "qwen") {
-      url = resolveQwenModelsUrl(connection);
-    } else if (effectiveProvider === "ollama-local") {
-      const baseUrl = connection?.providerSpecificData?.baseUrl;
-      if (!baseUrl) return NextResponse.json({ error: "No Ollama base URL configured" }, { status: 400 });
-      url = `${baseUrl.replace(/\/$/, "")}/api/tags`;
-    }
-
-    if (config.authQuery && token) {
-      url += `?${config.authQuery}=${token}`;
-    }
-
-    // Build headers — include the MITM anti-loop header so when this dev/
-    // runtime process makes the call AND the user has MITM intercept enabled
-    // for the upstream hostname (e.g. api.anthropic.com via Claude Desktop
-    // MITM), our own outbound fetch doesn't hit our own MITM and get a
-    // SELF_SIGNED_CERT_IN_CHAIN error. MITM checks this header first and
-    // passthroughs to the real upstream.
-    const headers = { ...config.headers, "x-request-source": "local" };
-    if (config.authHeader && !config.authQuery && token) {
-      headers[config.authHeader] = (config.authPrefix || "") + token;
-    }
-
-    // Make request
-    const fetchOptions = {
-      method: config.method,
-      headers
-    };
-
-    if (config.body && config.method === "POST") {
-      fetchOptions.body = JSON.stringify(config.body);
-    }
-
-    const response = await fetch(url, fetchOptions);
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      // 0.5.45 — truncate the error body in console output. Google's 404 page is
-      // 5KB of inline HTML which spams the user's log and makes everything look
-      // catastrophic. We keep the first 200 chars for debugging context.
-      const compact = typeof errorText === "string"
-        ? errorText.replace(/\s+/g, " ").slice(0, 200)
-        : "";
-      console.log(`Error fetching models from ${effectiveProvider} [${response.status}]: ${compact}`);
-      return NextResponse.json(
-        { error: `Failed to fetch models: ${response.status}` },
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    const models = normalizeModels(config.parseResponse(data));
-
-    return NextResponse.json({
-      provider: effectiveProvider,
-      connectionId: connection?.id || id,
-      models
-    });
+    return NextResponse.json(result);
   } catch (error) {
     console.log("Error fetching provider models:", error);
     return NextResponse.json({ error: error.message }, { status: 500 });

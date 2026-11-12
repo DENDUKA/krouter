@@ -1,9 +1,14 @@
 // Resolve valid thinking levels per model — drives UI level picker (suffix "model(level)").
 // Reuses capabilities.js (thinkingFormat/canDisable) so this file only maps format→levels (DRY).
 import { getCapabilitiesForModel } from "./capabilities.js";
-import { matchPattern } from "./pricing.js";
 import { resolveKiroEffortPath } from "../config/kiroConstants.js";
 import { getProviderModels } from "../config/providerModels.js";
+
+// Inline matchPattern — avoids pulling in pricing.js (Wave-2 module not in our tree).
+function matchPattern(pattern, model) {
+  const regex = new RegExp("^" + pattern.split("*").map(s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "i");
+  return regex.test(model);
+}
 
 // Shared level sets (deduped) — verified against provider docs + wire in thinkingUnified.applyFormat.
 const L = {
