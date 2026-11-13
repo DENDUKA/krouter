@@ -49,7 +49,9 @@ function buildProxyOptions(cfg) {
     connectionProxyUrl: cfg?.connectionProxyUrl || "",
     connectionNoProxy: cfg?.connectionNoProxy || "",
     vercelRelayUrl: cfg?.vercelRelayUrl || "",
-    strictProxy: false,
+    // 0.5.191-kr1 — honour the pool's strictness: a strict pool must not
+    // leak the server IP when the proxy is down.
+    strictProxy: cfg?.strictProxy === true,
   };
 }
 

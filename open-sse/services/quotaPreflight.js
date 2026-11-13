@@ -18,6 +18,7 @@
 //   path under 1ms even when /api/usage is mid-fetch.
 
 import { getUsageForProvider } from "./usage.js";
+import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 
 const DEFAULT_MIN_REMAINING_PERCENT = 2;
 const CACHE_TTL_MS = 60 * 1000; // 60s, same as OmniRoute's CACHE_TTL_MS
@@ -91,7 +92,18 @@ async function fetchAndCache(provider, connectionId, connection) {
 
   const promise = (async () => {
     try {
-      const usage = await getUsageForProvider(connection);
+      // 0.5.191-kr1 — background quota fetches used to carry no proxy
+      // options, so account usage calls left over the direct IP.
+      const resolved = await resolveConnectionProxyConfig(connection?.providerSpecificData || {});
+      const proxyOptions = {
+        connectionProxyEnabled: resolved.connectionProxyEnabled === true,
+        connectionProxyUrl: resolved.connectionProxyUrl || "",
+        connectionNoProxy: resolved.connectionNoProxy || "",
+        vercelRelayUrl: resolved.vercelRelayUrl || "",
+        proxyPoolId: resolved.proxyPoolId || null,
+        strictProxy: resolved.strictProxy === true,
+      };
+      const usage = await getUsageForProvider(connection, proxyOptions);
       const byModel = convertUsageToModelQuotas(usage);
       if (byModel) {
         cache.set(key, { byModel, fetchedAt: nowMs() });

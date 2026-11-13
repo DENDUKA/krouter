@@ -326,6 +326,122 @@ async function getDispatcher(proxyUrl) {
   return proxyDispatchers.get(normalized);
 }
 
+// 0.5.191-kr2 (DENDUKA) — undici v7 removed the `dispatcher` option from
+// fetch init, so ProxyAgent dispatchers were silently ignored and every
+// "proxied" request left over the direct IP while the logs claimed the pool
+// was applied (verified on the wire: zero TCP to the proxy). Route proxied
+// HTTPS calls through an explicit CONNECT tunnel on node:http + node:tls —
+// no undici fetch semantics involved.
+const _tunnelAgents = new Map();
+
+async function getTunnelAgent(proxyUrl) {
+  const normalized = normalizeProxyUrl(proxyUrl);
+  if (!normalized) return null;
+  const existing = _tunnelAgents.get(normalized);
+  if (existing) return existing;
+
+  const proxy = new URL(normalized);
+  const proxyAuth = proxy.username || proxy.password
+    ? "Basic " + Buffer.from(
+        `${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`
+      ).toString("base64")
+    : null;
+
+  const httpModule = await import("http");
+  const http = httpModule.default ?? httpModule;
+  const tlsModule = await import("tls");
+  const tls = tlsModule.default ?? tlsModule;
+  const httpsModule = await import("https");
+  const https = httpsModule.default ?? httpsModule;
+
+  const agent = new https.Agent({
+    keepAlive: true,
+    keepAliveMsecs: 30_000,
+    maxSockets: 50,
+    maxFreeSockets: 10,
+    timeout: 60_000,
+    scheduling: "lifo",
+    createConnection: (opts, callback) => {
+      const targetHost = opts.host || opts.hostname;
+      const targetPort = opts.port || 443;
+      const connectReq = http.request({
+        host: proxy.hostname,
+        port: Number(proxy.port) || 80,
+        method: "CONNECT",
+        path: `${targetHost}:${targetPort}`,
+        headers: proxyAuth ? { "proxy-authorization": proxyAuth } : {},
+      });
+      connectReq.once("connect", (res, socket) => {
+        if (res.statusCode !== 200) {
+          socket.destroy();
+          callback(new Error(`Proxy CONNECT failed: HTTP ${res.statusCode}`));
+          return;
+        }
+        const tlsSocket = tls.connect({
+          socket,
+          servername: targetHost,
+          ALPNProtocols: ["http/1.1"],
+        });
+        tlsSocket.once("error", (err) => callback(err));
+        callback(null, tlsSocket);
+      });
+      connectReq.once("error", (err) => callback(err));
+      connectReq.end();
+    },
+  });
+
+  _tunnelAgents.set(normalized, agent);
+  return agent;
+}
+
+async function fetchViaProxy(url, options, proxyUrl) {
+  const parsed = new URL(url);
+  const body = options.body;
+  const bodySupported =
+    body == null || typeof body === "string" || Buffer.isBuffer(body) || body instanceof Uint8Array;
+
+  if (parsed.protocol !== "https:" || !bodySupported) {
+    // Out of scope for the tunnel (plain-http upstream or exotic body):
+    // best-effort undici fetch, same as pre-fix behaviour.
+    const dispatcher = await getDispatcher(proxyUrl);
+    const undici = await import("undici");
+    const undiciFetch = undici.fetch ?? undici.default?.fetch;
+    if (typeof undiciFetch === "function") {
+      return undiciFetch(url, { ...options, dispatcher });
+    }
+    return originalFetch(url, { ...options, dispatcher });
+  }
+
+  const agent = await getTunnelAgent(proxyUrl);
+  const httpsModule = await import("https");
+  const https = httpsModule.default ?? httpsModule;
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: parsed.hostname,
+      port: parsed.port || 443,
+      path: parsed.pathname + parsed.search,
+      method: options.method || "GET",
+      headers: { ...toPlainHeaders(options.headers) },
+      agent,
+    }, (res) => {
+      resolve(new Response(Readable.toWeb(res), {
+        status: res.statusCode,
+        statusText: res.statusMessage || "",
+        headers: res.headers,
+      }));
+    });
+    req.on("error", reject);
+    if (options.signal) {
+      const onAbort = () => { try { req.destroy(new Error("aborted")); } catch { /* ignore */ } };
+      if (options.signal.aborted) { onAbort(); return; }
+      options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    if (body != null) req.write(body);
+    req.end();
+  });
+}
+
 /**
  * Create HTTPS request with manual socket connection (bypass DNS)
  *
@@ -418,8 +534,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
     if (proxyUrl) {
       // Proxy resolves DNS externally (not affected by /etc/hosts) — use proxy directly
       try {
-        const dispatcher = await getDispatcher(proxyUrl);
-        return await originalFetch(url, { ...options, dispatcher });
+        return await fetchViaProxy(url, options, proxyUrl);
       } catch (proxyError) {
         if (proxyOptions?.strictProxy === true) {
           throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
@@ -439,8 +554,7 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
 
   if (proxyUrl) {
     try {
-      const dispatcher = await getDispatcher(proxyUrl);
-      return await originalFetch(url, { ...options, dispatcher });
+      return await fetchViaProxy(url, options, proxyUrl);
     } catch (proxyError) {
       // If strictProxy is enabled, fail hard instead of falling back to direct
       if (proxyOptions?.strictProxy === true) {

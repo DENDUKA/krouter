@@ -169,7 +169,7 @@ export async function GET(request, { params }) {
       connectionProxyUrl: proxyConfig.connectionProxyUrl || "",
       connectionNoProxy: proxyConfig.connectionNoProxy || "",
       vercelRelayUrl: proxyConfig.vercelRelayUrl || "",
-      strictProxy: false,
+      strictProxy: proxyConfig.strictProxy === true,
     };
 
     // Refresh credentials only for OAuth connections (apikey has no token refresh)
@@ -228,7 +228,7 @@ export async function POST(request, { params }) {
       connectionProxyUrl: proxyConfig.connectionProxyUrl || "",
       connectionNoProxy: proxyConfig.connectionNoProxy || "",
       vercelRelayUrl: proxyConfig.vercelRelayUrl || "",
-      strictProxy: false,
+      strictProxy: proxyConfig.strictProxy === true,
     };
 
     // Use the same refresh-and-fetch pipeline as GET so we benefit from token
