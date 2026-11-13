@@ -94,7 +94,7 @@ const LOCAL_ONLY_PATHS = [
 ];
 
 function resolveRouterControlToken(settings) {
-  return settings?.routerControlToken || process.env.ROUTER_CONTROL_TOKEN || "";
+  return process.env.ROUTER_CONTROL_TOKEN || settings?.routerControlToken || "";
 }
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
