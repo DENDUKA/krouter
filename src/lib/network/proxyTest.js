@@ -1,4 +1,7 @@
-import { ProxyAgent, fetch as undiciFetch } from "undici";
+import { proxyAwareFetch } from "open-sse/utils/proxyFetch.js";
+// 0.5.191-kr2 (DENDUKA) — undici v7 removed the `dispatcher` option from
+// fetch init, so the old ProxyAgent-based test fetched the target directly
+// and reported success even with the proxy unreachable.
 
 const DEFAULT_TEST_URL = "https://google.com/";
 const DEFAULT_TIMEOUT_MS = 8000;
@@ -38,31 +41,22 @@ export async function testProxyUrl({ proxyUrl, testUrl, timeoutMs } = {}) {
       ? Math.min(timeoutMsRaw, 30000)
       : DEFAULT_TIMEOUT_MS;
 
-  let dispatcher;
-
   try {
-    try {
-      dispatcher = new ProxyAgent({ uri: normalizedProxyUrl });
-    } catch (err) {
-      return {
-        ok: false,
-        status: 400,
-        error: `Invalid proxy URL: ${err?.message || String(err)}`,
-      };
-    }
 
     const controller = new AbortController();
     const startedAt = Date.now();
     const timer = setTimeout(() => controller.abort(), normalizedTimeoutMs);
 
     try {
-      const res = await undiciFetch(normalizedTestUrl, {
+      const res = await proxyAwareFetch(normalizedTestUrl, {
         method: "HEAD",
-        dispatcher,
         signal: controller.signal,
-        headers: {
-          "User-Agent": "kRouter",
-        },
+      }, {
+        enabled: true,
+        connectionProxyEnabled: true,
+        connectionProxyUrl: normalizedProxyUrl,
+        connectionNoProxy: "",
+        strictProxy: true,
       });
 
       return {
