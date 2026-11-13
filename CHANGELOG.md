@@ -1,3 +1,346 @@
+# v0.5.191 (2026-11-13) — captured Claude turns stop getting rejected, and capture is one switch
+
+Two bugs found from a real session's logs. Both presented as network faults and
+neither was one.
+
+**The client's Anthropic-Beta flags were being thrown away.** A beta flag
+authorises the request-body fields that depend on it, so dropping one does not
+make Anthropic ignore the field — it makes Anthropic reject the request. One
+captured Claude Code turn, four 400s in a row:
+
+    safeguards: Extra inputs are not permitted
+    thread: Extra inputs are not permitted
+    tools.50: Input tag 'advisor_20260301' ... does not match any of the expected tags
+    thinking.adaptive.display: Input should be 'summarized', 'omitted'
+
+then a fifth attempt succeeded. The body reached Anthropic untouched — the router
+logged `PASSTHROUGH claude -> claude | native lossless` — but the header
+permitting those fields did not. `anthropic-beta` was already whitelisted into
+`credentials.rawHeaders`, and nothing on the Claude path ever read it: the only
+consumers were kiro, opencode, opencode-go and cursor. The executor meanwhile
+assigned `selectAnthropicBeta(model, body)` from a hardcoded list, unconditionally.
+
+The client then degraded its feature set on each retry until a shape fit the
+flags being sent, which is why some turns worked at the cost of several rejected
+upstream calls, and why anything it could not degrade failed outright. The flags
+are now merged: ours still ship, because the OAuth flag, the Claude Code identity
+the upstream gates on, caching and the heavy-agent pair are ours to require. The
+`redact-thinking` rule is applied to the merged set, so a client sending it
+alongside `thinking.display: "summarized"` still gets its summaries.
+
+Two call sites needed this, not one. The second serves a node fronting Anthropic,
+and its own comment records this same "Extra inputs are not permitted" 400 being
+hit once before and patched by adding a single flag to the static list —
+forwarding what the client sent is what stops the next one recurring.
+
+**The two capture transports are now one switch.** They started and stopped
+independently, and the states that produced were worse than either being off.
+The proxy is spawned detached and unref'd so it outlives the app: stop MITM, or
+hard-kill the app, and the proxy kept listening on 20129 with nothing behind it.
+Measured in that state:
+
+    router on 20128: DOWN | proxy on 20129: UP
+    /_krouter_proxy_health -> {"ok":true,...}
+    intercepted request    -> HTTP 500 {"error":{"message":"fetch failed"}}
+
+So anything pointed at HTTPS_PROXY failed while the health check said everything
+was fine. Starting MITM now starts the proxy on both success paths, including the
+one that reuses an already-running server, since that case can still be missing
+its proxy. Stopping MITM stops it first, so the bad window is short rather than
+permanent. A proxy failure cannot fail a MITM start: the :443 transport is useful
+on its own.
+
+**And that health check no longer lies.** `ok` means "can serve an intercepted
+request", not "the port is open": it probes the router it forwards to, with a
+two-second timeout, and answers 503 with the reason when that is unreachable.
+Verified by recreating the orphan — hard-killing the supervisor so its cleanup
+never ran — where it previously said `{"ok":true}` and now says
+`503 {"ok":false,"routerReachable":false,"detail":"listening, but the kRouter
+server it forwards to is unreachable — intercepted requests will fail"}`.
+
+Verified live on a real install: one call up, one call down, both ports following
+together, auto-start bringing both back after a restart, and a plain curl to
+api.anthropic.com captured and answered.
+
+# v0.5.190 (2026-11-13) — first release through a configured trusted publisher
+
+No code change. Cut to exercise the npm Trusted Publisher that has just been
+configured for this package, and to find out whether a trusted publish still
+spends 55 minutes in npm's staging.
+
+Until now every release fell back to the NPM_TOKEN secret, because the OIDC
+exchange was refused:
+
+    npm refused trusted publishing for @sifxprime/krouter
+    (HTTP 404 OIDC token exchange error - package not found)
+
+The claims the workflow sends were correct all along — repository
+`sifxprime/krouter`, workflow `npm-publish.yml`, environment null, with
+`id-token: write` present — so there was nothing in this repository to change.
+npm simply had no trusted-publisher record to match them against.
+
+What this release answers, from its own log:
+
+  - `Check npm trusted publishing` printing HTTP 200 rather than 404 means npm
+    now accepts this workflow, and the token fallback is no longer in the path.
+  - How long the serve gate waits. `npm trust github` exposes `--allow-publish`
+    and `--allow-stage-publish` as separate permissions, so staging is something
+    a publisher is or is not allowed to skip — which makes the 55 minutes a
+    permissions question rather than registry load. v0.5.187 and v0.5.188 each
+    took 3301 seconds; v0.5.189 took 3299. Three releases within two seconds of
+    each other is a fixed window, not congestion.
+
+For the record, v0.5.189 was the first release where the gate added in that
+version did its job: published at 21:25:00, served at 22:20:39 after 166 polls,
+with `dist-tags.latest` moving to 0.5.189 in the same moment. A 25-minute ceiling
+would have failed a release that was fine. Nothing is wrong with the dist-tag; it
+follows the version write, and earlier reports of it lagging were registry reads
+taken inside the staging window.
+
+# v0.5.189 (2026-11-13) — a green release now means the version is installable
+
+No product change. This is the release pipeline learning the difference between
+"npm accepted the upload" and "npm serves it", which it has been getting wrong
+all day.
+
+**A staged 409 is no longer a failure.** npm holds a new publish in a staged
+state while it validates it. A staged version is not served — `npm view` 404s, so
+this workflow's own version check reports it as unpublished — but a second upload
+of it is refused:
+
+    npm error code E409
+    409 Conflict - PUT .../@sifxprime%2fkrouter
+    Cannot publish over previously staged version "0.5.183".
+
+That is the previous attempt still in flight, not a failed release, and failing on
+it is how v0.5.183's retry reported a publish npm had in fact accepted. Matched on
+the code AND the wording AND the version being released, so a 409 about any other
+version, and every other error — E404, E403, EPUBLISHCONFLICT, ENEEDAUTH, a build
+failure — still fails. The matcher is tested as shell against npm's real output in
+both directions.
+
+**Success now means the registry serves it.** A new gate polls the version
+document until it answers 200, past any CDN cache, and only then passes. This is
+the mistake that mattered: v0.5.185's publish step went green while `npm install`
+could not reach that version for hours, and it was reported as released on that
+basis. The gate also reports whether `dist-tags.latest` moved — a separate
+registry write, and the thing a plain `npm i -g` actually resolves. Observed on
+v0.5.187: served, while latest still pointed at v0.5.186.
+
+The wait is 75 minutes because v0.5.187 took 55 to appear after a green publish.
+A 25m ceiling would have failed that release and opened an issue for something
+that was fine half an hour later. The job timeout went to 110 to match; left at
+30, GitHub would have cancelled the job mid-wait and the release would have failed
+for the one reason the gate exists to describe properly. A test pins the two
+together, because nothing else in the file connects them.
+
+The issue this workflow opens on failure now separates the two causes: an upload
+that never landed (fix the Trusted Publisher) from one that landed and is staged
+(re-run to re-check, nothing needs republishing).
+
+Also added: the workflow is now checked as YAML and every `run` step parsed with
+`sh -n`. While writing this change the file was syntactically broken for a while —
+a continuation line of a shell string sat at column 0 and ended a `run: |` block
+scalar — and the whole suite stayed green, because every test read it as text.
+GitHub would only have said so on the next tag, after the release was cut.
+
+Still unfixed, and the cause of all of the above: trusted publishing is refused
+for this package (OIDC exchange 404, "package not found") so every release goes
+out through the NPM_TOKEN fallback and gets staged. That needs a Trusted Publisher
+configured on npmjs.com — owner `sifxprime`, repository `krouter`, workflow
+`npm-publish.yml`, no environment — which only the package owner can do.
+
+# v0.5.188 (2026-11-13) — proxy capture comes back after a restart too
+
+Carries v0.5.187, which npm accepted and has not served, so that version has
+never been installable.
+
+v0.5.187 made the :443 transport restart itself. The proxy transport still did
+not, and the reason it looked like it did is worth writing down: it is spawned
+detached and `unref()`ed, so it outlives the app and gets reparented to launchd.
+One found running on a real machine had been up since a session months earlier.
+Kill it once — a reboot, a crash, an unlucky pkill — and it stayed dead, because
+the only thing it ever recorded was a pid file. Nothing anywhere said it had been
+switched on.
+
+So it now has the twin of `mitmEnabled`: `proxyCaptureEnabled`, written when it
+starts, when a start finds it already running, and when it stops — but
+deliberately NOT when a start fails, because a start that did not work is not a
+state to restore on the next boot. `autoStartProxyCapture()` runs in the same
+bootstrap as the MITM one and is deliberately independent of it: no `mitmEnabled`
+gate and no sudo password, since this transport needs neither and touches no
+system state. A test asserts both absences rather than trusting the comment.
+
+The upgrade path is handled, because without it this change would have broken the
+people it is for. Anyone running proxy capture today has no `proxyCaptureEnabled`
+in settings; read as "off", their capture would quietly stop coming back. A proxy
+already accepting at boot with the setting unset is therefore adopted and
+recorded. Measured on a real install: setting null, restart, setting 1, proxy
+untouched.
+
+Verified from a cold slate — all three ports free, no krouter process, no pid or
+lock files — with launchd starting the service and nothing else touched:
+
+    20128 up at              +4s
+    443   (MITM)             +4s
+    20129 (proxy capture)    +4s
+
+Both answered a real request afterwards, DNS was restored for all three enabled
+tools, and both the proxy and the sudo/MITM chain were children of the service's
+own server process rather than anything started by hand.
+
+# v0.5.187 (2026-11-13) — the background bootstrap no longer waits for someone to log in
+
+This is the release that actually fixes MITM auto-start. v0.5.185 and v0.5.186
+fixed two things that were genuinely broken on that path and neither was ever
+reached, because `initializeApp` was not running at all.
+
+It was reachable only as a side effect of importing `app/layout.js`, which Next
+evaluates while rendering a page. `/login` is prerendered — `○ /login` in the
+build, `server/app/login.html` in the output — so it is served as static HTML
+without evaluating the layout, and `/dashboard` is redirected by middleware
+before it renders. On a boot where nobody is signed in, nothing renders a
+dynamic page, so none of this started:
+
+  - MITM auto-start (the reported symptom: capture never came back after a
+    reboot, and the watchdog then stripped the DNS redirects it could not serve)
+  - the connection watchdog and the network monitor
+  - tunnel and Tailscale auto-resume
+  - the token warmer and background quota refresh
+
+All of it was waiting for someone to open the dashboard and log in. Measured on
+the published v0.5.186: service up, `/login` 200, `/api/health` 200,
+`/dashboard` 307, and not one `[InitApp]` line in four minutes with :443 down.
+
+`src/instrumentation.js` exports Next's `register()` hook, which runs once when
+the server process starts — what this work always needed. The layout keeps its
+import; bootstrap.js is guarded by `global.__appBootstrapped`, so whichever path
+arrives first wins and the other is a no-op, and dev HMR behaves as before. The
+edge runtime returns immediately: no filesystem, no child processes, no business
+starting a MITM server.
+
+Verified on the same boot that failed before — launchd's exact PATH, and not one
+page loaded:
+
+    [InitApp] MITM was enabled, auto-starting...
+    [MITM] 🚀 Starting server... (router: http://localhost:20128)
+    [InitApp] MITM auto-started
+    [InitApp] DNS restored from saved state
+
+Port 443 came up immediately, DNS was restored for all three enabled tools, and
+a plain curl to api.anthropic.com was captured and answered.
+
+A note on how this was missed: the v0.5.185 boot test passed against a build run
+by hand, and a leftover instance of that build kept holding port 20128
+afterwards — so the follow-up check that was supposed to confirm the published
+package was talking to the hand-built one instead. A test now fails if
+`app/layout.js` ever becomes the only importer of the bootstrap again.
+
+# v0.5.186 (2026-11-13) — the build stops phoning Google for fonts
+
+Carries everything in v0.5.185, which npm accepted and then left staged: the
+registry has not served it, so `npm install` cannot reach it. Cut again here with
+the font fix on top.
+
+**`next/font/google` resolved its CSS during `next build`,** so a production build
+only succeeded while fonts.googleapis.com answered the machine doing the
+building. It did not, twice in one day — the first v0.5.183 npm publish and the
+v0.5.185 Docker image — both dying as:
+
+    src/app/layout.js
+    An error occurred in `next/font`.
+    TypeError: Cannot read properties of null (reading '1')
+        at .../@next/font/dist/google/loader.js:122:78
+
+Both recovered on a blind re-run, which is the worst shape a release step can
+have: it fails for a reason nothing in the diff explains, and retrying looks like
+a fix. Inter and Space Grotesk are now committed as latin-subset variable woff2
+and read with `next/font/local`. Verified by building with both Google font hosts
+blocked at the socket layer — exit 0, compiled successfully.
+
+Nothing changes for visitors. `next/font/google` already self-hosted these files,
+and the two the build emits are byte-identical to the ones v0.5.184 shipped —
+same sha256, same content-hashed name:
+
+    36966cca54120369-s.p.woff2   shipped=a0d054c4af55  new=a0d054c4af55
+    e4af272ccee01ff0-s.p.woff2   shipped=c940764593d0  new=c940764593d0
+
+It also drops 204 KB of fonts nothing renders. The google loader pulled every
+unicode-range subset — latin-ext, cyrillic, greek, vietnamese — for a latin-only
+UI: 10 woff2 totalling 276 KB, against 2 totalling 72 KB now.
+
+One subtlety is pinned by a test rather than left to luck. `--font-sans` names the
+literal `'Inter'`, not `var(--font-inter)`. `next/font/local` names the family
+after the binding it is assigned to, so `const inter` emits
+`@font-face{font-family:inter}`, and CSS matches family names ASCII
+case-insensitively — rename that one binding and the body silently falls to
+-apple-system with nothing erroring. (The old loader emitted the real `Inter`,
+confirmed in the shipped v0.5.184 CSS, so the rendered typeface is unchanged.)
+
+Both families are OFL-1.1, which permits redistributing the files; provenance,
+source URLs and axis ranges are in src/app/fonts/README.md.
+
+# v0.5.185 (2026-11-13) — MITM comes back after a reboot
+
+Three bugs, all silent. The first two stacked: MITM never auto-started after a
+restart, and the watchdog then stripped the DNS redirects it could no longer
+serve, so capture was simply off until someone opened the dashboard.
+
+**The saved sudo password could not be read under launchd.** `node-machine-id`
+shells out to `ioreg`, which lives in /usr/sbin, and the LaunchAgent's PATH was
+`<node>/bin:/usr/local/bin:/usr/bin:/bin`. Measured on a real machine:
+
+    $ env -i PATH=<the plist's PATH> node -e 'machineIdSync()'
+    /bin/sh: ioreg: command not found
+
+So the call threw, the key derivation silently fell back to hashing the salt
+alone — a different key — AES-GCM rejected the auth tag, and the password read
+as absent. The whole failure surfaced as `MITM was enabled but no saved password
+found, skipping auto-start`, which is the wrong sentence: the password was on
+disk and decrypted fine by hand.
+
+The key now comes from the machine id this app already persists to
+`DATA_DIR/machine-id`, the file shared/utils/machineId.js keeps for exactly this
+reason ("guarantees CLI/server/middleware see same value even when machineIdSync
+fails"). Reading a file needs no PATH. Decryption tries every historical key, so
+a password saved under the old derivation still opens and nobody re-enters
+anything. The candidates are memoized: that call ran per decrypt attempt and
+printed `ioreg: command not found` 162 times in a single boot.
+
+**A stale start lock blocked every later start, permanently.** The lock is
+written with O_EXCL and removed on every clean path — but not by a SIGKILL, and
+`launchctl kickstart -k` is a SIGKILL. The leftover file named a pid that had
+been dead for six minutes and the throw was unconditional, so after one unclean
+shutdown MITM could never start again until someone deleted the file by hand:
+
+    [InitApp] MITM was enabled, auto-starting...
+    [InitApp] MITM auto-start failed: MITM server is already starting (lock contention)
+
+A lock whose holder is gone is now reclaimed, with a two-minute age backstop for
+a recycled pid number.
+
+`/usr/sbin:/sbin` are added to the LaunchAgent PATH as well. manager.js no longer
+needs ioreg, but the next caller reaching for an sbin tool should not have to
+rediscover that a LaunchAgent only gets the PATH written into the plist.
+
+The one unhelpful log line now distinguishes its four causes. That silence is why
+this survived.
+
+**lastUsed stayed a bare date for the first hours of each local day.** Found
+because the test run crossed midnight and three existing tests went red on an
+unchanged checkout. The daily rollup stores `lastUsed` as a LOCAL day key and the
+overlay refines it from a UTC timestamp; `new Date("2026-11-13")` parses as UTC
+midnight, so at UTC+6 every entry recorded between 00:00 and 06:00 local compared
+as older than its own day key and was never refined. One comparison helper now
+covers all four buckets, and byTool is refined with them instead of being the one
+row on the page still showing a date.
+
+Verified by booting with `env -i PATH=<the exact plist PATH>` and a stale lock
+left in place: port 443 came up with no intervention and no sudo prompt, DNS was
+restored from saved state, and a plain curl to api.anthropic.com was captured and
+answered. Reverting the key derivation fails three of the new tests, including
+two different keys for the two PATHs.
+
 # v0.5.184 (2026-11-12) — usage can finally tell you which IDE spent the money
 
 There is no 0.5.183 on npm. Its publish was accepted, signed and logged, and
