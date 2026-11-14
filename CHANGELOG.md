@@ -1,3 +1,190 @@
+# v0.5.194 (2026-11-14) — two API routes that never shipped
+
+Reported from a real install of 0.5.192:
+
+    Error: Cannot find module
+    '/opt/homebrew/lib/node_modules/@sifxprime/krouter/app/.next-cli-build/
+     server/app/api/pxpipe/logs/route.js'
+    at Module._resolveFilename (node:internal/modules/cjs/loader:1475:15)
+
+`cli/scripts/build-cli.js` copies the Next build into the published package
+through a filter that matched on basename alone:
+
+    function shouldExclude(name) { ... return name === pattern; }
+
+One of its patterns is `logs`, meaning a runtime log directory. Next compiles
+`src/app/api/<x>/logs/route.js` to `server/app/api/<x>/logs/route.js` — a
+directory named `logs`. The copy deleted it, every check stayed green, and the
+published server threw on the first request to the endpoint.
+
+Diffing a local build against the installed package found exactly two
+casualties out of 188 routes:
+
+    /api/pxpipe/logs   added in v0.5.111, broken ever since
+    /api/usage/logs    present since the initial release, so it has never
+                       shipped once, in any version
+
+Confirmed against the published 0.5.191 tarball: zero of them present, against
+304 other API files. Not a regression — a filter and a route that had simply
+never been compared.
+
+The patterns move to `cli/scripts/exclude-patterns.js`, split by where they are
+safe to apply. A generic word like `logs` or `tmp` is a runtime artefact at the
+top of a package and a legitimate URL segment inside compiled route output, so
+it cannot be matched in both places by one rule; `shouldExclude` now takes the
+directory being copied and spares `server/app`. Everything that is never a
+route segment — sharp, `.env*`, `*.nft.json`, and `.build-home`, which once
+leaked a jwt-secret identical for every installer — is still dropped
+everywhere.
+
+Nothing compared the routes that exist against the routes that ship, which is
+how a whole endpoint stayed missing for the life of the project.
+`tests/unit/cli-bundle-keeps-every-route.test.js` does that now; re-introducing
+the single-list filter makes it name both lost routes.
+
+Verified by running the real CLI build: both routes present in the bundle,
+route count 156 to 156 with nothing dropped, and zero jwt-secret, machine-id,
+`.build-home` or `*.sqlite*` files in the output.
+
+# v0.5.193 (2026-11-14) — the Chat page is reachable
+
+`/dashboard/basic-chat` has existed since the initial release and nothing ever
+linked to it. Not the sidebar, not any other page — the only way to open it was
+to type the URL.
+
+`tests/unit/sidebar-nav-coverage.test.js` exists for exactly this. It was
+written after v0.5.111 added the Token Saver page by overwriting the MITM line
+in the sidebar instead of inserting beside it, which left MITM serving 200 and
+unreachable until a user noticed. The guard turns an orphaned page into a test
+failure.
+
+It was passing here because of an exemption:
+
+    "basic-chat": "deliberately hidden; the entry is commented out in navSections"
+
+navSections.js contains no mention of basic-chat in any form, commented or
+otherwise. The line that reason referred to was removed at some point and the
+exemption outlived it, so the guard was asserting nothing about the one page it
+excused — and an exemption whose reason has gone stale is indistinguishable
+from the orphan it is meant to excuse. That is the same failure mode the
+guard's own comment records: an older version of it scanned the component with
+a regex that matched a commented-out line, counting a route as covered while it
+was unreachable.
+
+Chat is now the last item under Route, because it is how you check the route
+you just configured actually answers. `NOT_IN_SIDEBAR` is empty, and the
+comment in its place requires any future entry to carry a reason that can be
+checked against the code.
+
+Nothing else changed. If you are coming from 0.5.191, 0.5.192 is where the
+dashboard layout work and the single capture switch landed.
+# v0.5.192 (2026-11-14) — one shell, one title, one empty state
+
+A pass over every dashboard page for layout, reported as gaps between a page's
+title and the content under it. Measured at 1440x900 before any change:
+
+    width  left   offset from the header   pages
+     1102   292                      8px   dashboard, providers, usage, combos, ...
+     1024   334                     50px   cli-tools, proxy-pools, cli-tools/[id]
+      896   395                    111px   skills, presidio
+      768   462                    178px   token-saver
+      672   507                    223px   profile, providers/new
+
+Six widths for one shell. On Settings the heading sat 223px to the left of the
+form it labelled, with roughly 430px of dead grid either side.
+
+**The geometry had two definitions.** The header bar and the scrolling content
+area are siblings, and each carried its own: the header `px-4 lg:px-8` across
+the full width, the content `p-6 lg:p-10` capped at `max-w-7xl`. That alone put
+the title block at x=284 and the content at x=292 on every page in the app.
+Pages then set widths of their own on top, and five stacked their own `p-6`/`p-8`
+on the layout's 40px so their content was inset 64-72px instead of 40.
+
+Both halves now read `src/shared/constants/pageShell.js`, which offers two
+widths rather than six. The width is chosen by route, not by the page
+component: the header renders as a sibling above `children`, so a width a page
+declared during its own render could not reach the header without a provider
+above both, and the header already derives everything else it shows from the
+pathname. A narrow route narrows the header too, so a settings form and its
+title move together.
+
+Equal padding still left 3px. The content area is a scroll container whose
+styled scrollbar is 6px of real layout width, so its usable box is narrower and
+a centred narrow track lands half that to the left — 459 against 462 on
+/dashboard/profile. The scroller now reserves that gutter permanently
+(`scrollbar-gutter: stable`, which also stops a page shifting sideways once its
+content passes one screen) and the header reserves the same by hand, both
+driven by one `--shell-scrollbar` variable that the scrollbar rule itself reads.
+
+Offset is now 0 on all 20 routes, at 390px, 1280px and 1440px.
+
+**The header bar had no slot for a page action,** so any page needing a button
+rebuilt the whole title row beneath it. Two titles on screen, and several
+disagreed:
+
+    /dashboard/providers/new        bar: "Providers"      page: "Add New Provider"
+    /dashboard/presidio             bar: "Presidio"       page: "Settings"
+    /dashboard/media-providers/web  bar: "web"            (lowercase path segment)
+    /dashboard/providers/anthropic  the name three times in ~150px
+    /dashboard/cli-tools/claude     bar: "CLI Tools" for every tool
+
+Two of those were routing bugs rather than duplication. `/providers/new` is a
+form, not a provider: the `/providers/([^/]+)$` branch matched "new", failed to
+resolve it, and fell through to the generic "Providers". `/media-providers/web`
+is a combined page for the webSearch and webFetch kinds, not a kind — the
+`[kind]` regex matched it, found nothing in MEDIA_PROVIDER_KINDS, and printed
+the raw path segment. Both now match exactly, ahead of the regex that swallowed
+them.
+
+Pages put their primary action in the bar through `<HeaderActions>`, a portal
+rather than a store: a stored React element is a snapshot, and its handlers
+would close over whatever page state existed when it was stored. Below `lg` the
+children render in place instead — with proxy-pools' three actions moved up, the
+header's content measured 666px inside a 390px box and pushed the page title and
+the theme, language and menu controls off the right edge.
+
+The bar's height no longer changes as you move between pages: it was 79px where
+a description existed and 61px on the breadcrumb routes that have none.
+
+**`.data-table-empty` was defined in globals.css and used by nothing.** All four
+tables hand-rolled a cell instead, with three paddings for the same thing —
+`py-6`, `px-6 py-8`, `p-8`. The block form was worse: eight sites across four
+paddings and three icon treatments, now one `<EmptyState>`. The one-line muted
+notes inside a card or list are deliberately left alone; wrapping "No models
+added yet" in a centred block would make it louder than the thing it annotates.
+
+Page section rhythm was 24px, 32px, or `space-y-6` — 24px again by a second
+idiom. Loading skeletons disagreed with the content they stood in for, so
+providers rendered its skeletons at 32px and its content at 24px and the page
+visibly reflowed when the data arrived.
+
+`.section-title` keeps no margin of its own, deliberately. 63 uses carry none
+and take their spacing from a parent `gap`; the 37 that set one are nearly all
+modal headings, which own their spacing. Baking a margin into the class would
+have changed the 63 that were already right.
+
+**Two bugs found on the way that are not UI.** `next dev` had served HTTP 500 on
+every route since v0.5.187: that release added `src/instrumentation.js` so the
+background bootstrap runs when the server starts, and instrumentation is
+compiled for every runtime, but the chain through bootstrap to better-sqlite3
+reaches `require('fs')`, which the edge runtime has no answer for. The
+`NEXT_RUNTIME !== "nodejs"` guard inside `register()` cannot help — it runs at
+runtime and this fails at compile time. Turbopack, Next 16's default and the
+reason `--webpack` is legacy, resolves it per runtime. `build` stays on webpack:
+the production build was never affected and the release ships from it.
+
+And `.claude/launch.json` pointed the preview server at 20129, which is
+`DEFAULT_PROXY_PORT` in `src/mitm/proxy.js`, so it could never start while proxy
+capture was running.
+
+Also in this release: the MITM tool card no longer offers a separate start/stop
+for proxy capture. Coupling the two transports in the manager was only half of
+0.5.191's fix — the card still rendered its own control, so they could be driven
+apart again from the UI and still looked like independent things.
+
+Verified against the production build throughout, because three pages never
+finish hydrating under `next dev`; that is pre-existing and was confirmed by
+reproducing it at HEAD with every change stashed.
 # v0.5.191 (2026-11-13) — captured Claude turns stop getting rejected, and capture is one switch
 
 Two bugs found from a real session's logs. Both presented as network faults and
