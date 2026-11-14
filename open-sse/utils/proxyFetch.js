@@ -361,8 +361,14 @@ async function getTunnelAgent(proxyUrl) {
     maxFreeSockets: 10,
     timeout: 60_000,
     scheduling: "lifo",
-    createConnection: (opts, callback) => {
-      const targetHost = opts.host || opts.hostname;
+  });
+
+  // 0.5.191-kr3 (DENDUKA) — node 22.x does NOT wire the `createConnection`
+  // constructor option into the agent: it stays unused in agent.options and
+  // the prototype tls.connect dials the target directly (verified live —
+  // the constructor variant never dialled the proxy). Assigning the function
+  // on the instance is what actually takes effect.
+  agent.createConnection = (opts, callback) => {      const targetHost = opts.host || opts.hostname;
       const targetPort = opts.port || 443;
       const connectReq = http.request({
         host: proxy.hostname,
@@ -387,14 +393,14 @@ async function getTunnelAgent(proxyUrl) {
       });
       connectReq.once("error", (err) => callback(err));
       connectReq.end();
-    },
-  });
+  };
 
   _tunnelAgents.set(normalized, agent);
   return agent;
 }
 
 async function fetchViaProxy(url, options, proxyUrl) {
+  const __dbgBody = options.body;
   const parsed = new URL(url);
   const body = options.body;
   const bodySupported =
