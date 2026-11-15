@@ -42,7 +42,7 @@ const CREDITS_EXHAUSTED_KEYWORDS = [
 ];
 
 const SHORT_COOLDOWN_MS = 5 * 60 * 1000;
-const FULL_QUOTA_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+const FULL_QUOTA_COOLDOWN_MS = 30 * 60 * 1000; // 30m default (was 24h): unparsed reset no longer strands the account for a day
 const INSTANT_RETRY_THRESHOLD_MS = 3 * 1000;
 
 export function classify429(errorMessage) {
