@@ -493,10 +493,16 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     // same "Individual quota reached" 429 body for both. When the quota cache
     // says the account is healthy on its daily budget for this model but we
     // STILL got a 429, we are almost certainly hitting the TPM window —
-    // which resets in ~1-3 min, not 30 min. Downgrade the cooldown so the
-    // account comes back into rotation fast instead of being parked for half
-    // an hour with a misleading "quota exhausted" message.
-    const TPM_COOLDOWN_MS = 90 * 1000;
+    // which resets in ~1-3 min, not 30 min.
+    //
+    // 2026-11-16 — shortened from 90s to 10s. The lock is only reached once the
+    // streak threshold (5 hits in 2 min) has already confirmed a real burst, and
+    // Google's minute bucket drains continuously rather than at one hard boundary:
+    // parking the account for 90s after a confirmed burst kept it idle long past
+    // the point Google would have answered again. Ten seconds is enough to let the
+    // in-flight burst settle; if the window is still closed, the next attempt
+    // re-enters the streak and parks it again.
+    const TPM_COOLDOWN_MS = 10 * 1000;
     const TPM_HEALTHY_QUOTA_THRESHOLD = 10;
     const errorTextLower = typeof errorText === "string" ? errorText.toLowerCase() : "";
     const looksLikeQuotaError = errorTextLower.includes("quota reached")

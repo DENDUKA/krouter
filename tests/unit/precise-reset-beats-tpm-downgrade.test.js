@@ -75,7 +75,7 @@ describe("markAccountUnavailable: precise reset vs TPM downgrade", () => {
     for (let i = 0; i < 5; i++) {
       out = await markAccountUnavailable("ag1", 429, "Individual quota reached", "antigravity", "gemini-3-pro", null);
     }
-    expect(out.cooldownMs).toBe(90 * 1000);
+    expect(out.cooldownMs).toBe(10 * 1000);
     expect(db.rows.ag1.lastError).toMatch(/TPM|per-minute/);
   });
 

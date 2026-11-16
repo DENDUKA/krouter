@@ -89,3 +89,17 @@ describe("rate-limit streak — reset on success", () => {
     expect(() => resetRateLimitStreak("never-seen")).not.toThrow();
   });
 });
+
+describe("rate-limit lock duration", () => {
+  // The streak gate already guarantees a real burst before we park the account, so the
+  // lock only has to let that burst settle. Google's minute bucket drains continuously
+  // rather than at a hard boundary, so 90s kept the account idle well past the point it
+  // would have answered; 10s is enough and a still-closed window re-enters the streak.
+  it("parks the account for ten seconds, not ninety", async () => {
+    const src = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("../../src/sse/services/auth.js", import.meta.url), "utf8"));
+
+    expect(src).toMatch(/const TPM_COOLDOWN_MS = 10 \* 1000;/);
+    expect(src).not.toMatch(/const TPM_COOLDOWN_MS = 90 \* 1000;/);
+  });
+});

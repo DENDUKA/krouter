@@ -223,8 +223,8 @@ describe("markAccountUnavailable with the OpenRouter free-model daily cap", () =
       outcome = await markAccountUnavailable("conn-min", 429, text, "openrouter", FREE_MODEL);
     }
 
-    expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 90_000 });
-    expect(db.rows["conn-min"][`modelLock_${FREE_MODEL}`]).toBe(new Date(NOW + 90_000).toISOString());
+    expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 10_000 });
+    expect(db.rows["conn-min"][`modelLock_${FREE_MODEL}`]).toBe(new Date(NOW + 10_000).toISOString());
   });
 
   it("keeps an upstream provider 429 on its current handling", async () => {
@@ -234,7 +234,7 @@ describe("markAccountUnavailable with the OpenRouter free-model daily cap", () =
       outcome = await markAccountUnavailable("conn-up", 429, text, "openrouter", FREE_MODEL);
     }
 
-    expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 90_000 });
+    expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 10_000 });
     expect(db.rows["conn-up"].modelLock___all).toBeUndefined();
   });
 });
