@@ -283,6 +283,19 @@ export class AntigravityExecutor extends BaseExecutor {
     if (transformedRequest.contents) {
       transformedRequest.contents = obfuscateBodyStrings(transformedRequest.contents);
     }
+    // 2026-11-17 — systemInstruction needs the same treatment and never got it.
+    // The block above only rewrites `contents`, so a client identity carried in
+    // the SYSTEM prompt reached Google verbatim. Measured on a live account:
+    // "You are an AI agent powered by DeepSeek Harness." inside systemInstruction
+    // produced a 429 RESOURCE_EXHAUSTED in ~350ms on both daily-cloudcode-pa
+    // hosts, while removing just that sentence from the very same request
+    // answered 200 in 10-20s. Nothing else about the request mattered — thinking
+    // level, 37 tools, maxOutputTokens 16384, toolConfig VALIDATED and 93 KB of
+    // payload all passed unchanged. ANTIGRAVITY_PROMPT_REWRITES above only strips
+    // a fixed set of competing-client sentences and cannot know every agent.
+    if (transformedRequest.systemInstruction) {
+      transformedRequest.systemInstruction = obfuscateBodyStrings(transformedRequest.systemInstruction);
+    }
 
 
     // 0.5.29 — envelope user-agent now varies by account type:
@@ -520,7 +533,6 @@ export class AntigravityExecutor extends BaseExecutor {
           body: JSON.stringify(transformedBody),
           signal
         }, proxyOptions);
-
         if (response.status === HTTP_STATUS.RATE_LIMITED || response.status === HTTP_STATUS.SERVICE_UNAVAILABLE) {
           // Try to get retry time from headers first
           let retryMs = this.parseRetryHeaders(response.headers);

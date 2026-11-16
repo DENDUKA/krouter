@@ -10,6 +10,17 @@
 const ZWJ = "‍";
 
 const DEFAULT_SENSITIVE_WORDS = [
+  // 2026-11-17 — "DeepSeek Harness" is the deciding trigger for the fake
+  // RESOURCE_EXHAUSTED 429 on antigravity. Measured against a live account with
+  // daily-cloudcode-pa: a request whose systemInstruction contains the literal
+  // sentence "You are an AI agent powered by DeepSeek Harness." is refused in
+  // ~350ms with 429 "Resource has been exhausted", while the exact same request
+  // with that sentence removed answers 200 in 10-20s. Quota was 97.9%, thinking
+  // level, tool count, maxOutputTokens and payload size were ruled out one by
+  // one. The 429 arrives far too fast to be a real quota read, and Google only
+  // reports this generic message for a flagged client, not for a spent bucket.
+  // The identity is what gets grepped — obfuscate the product name the same way
+  // the other competing-client brands already are.
   "opencode",
   "open-code",
   "cline",

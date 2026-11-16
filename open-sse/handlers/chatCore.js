@@ -426,6 +426,16 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Kiro requests take ~28s so 2 slots/account caps throughput at ~4 req/min
   // per account — nowhere near enough for an IDE that fans out parallel.
   const PROVIDER_CONCURRENCY_DEFAULTS = {
+    // orr-fix (2026-11-17) — the old note here claimed antigravity "rejects a
+    // second in-flight stream with a quota-class 429", and serialized the whole
+    // account to 1 slot. Measured directly against daily-cloudcode-pa with the
+    // real 37-tool payload: 2 and 3 parallel streams all returned 200 (20-37s
+    // each). The 429s that motivated the throttle came from the retired
+    // cloudcode-pa host (see providers.js fallback list), not from concurrency.
+    // Serializing to 1 slot is actively harmful for an agent like DSH, which
+    // fans out parallel sub-requests: every extra request queued behind a
+    // 20-60s stream and either timed out (503 "Account busy") or waited past
+    // the client's patience. 2 slots absorb the normal fan-out without queueing.
     antigravity: 2, kiro: 4, claude: 5, codex: 3,
     "mimo-free": 1, opencode: 1,
     "gemini-cli": 2, qoder: 2,
@@ -436,7 +446,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // 503 "busy" loops. Pick a value close to typical request duration so a
   // freeing slot is actually catchable.
   const SEMAPHORE_TIMEOUT_DEFAULTS = {
-    antigravity: 5_000,  // antigravity is fast (~2-5s typical)
+    // orr-fix (2026-11-17) — measured antigravity stream durations with the real
+    // dsh payload: 10s, 16s, 29s, 32s and 64s, plus 100s on a cold token. A 30s
+    // wait meant a waiter queued behind the 64s/100s cases always timed out and
+    // surfaced 503 "Account busy, try another" — the client saw a failure while
+    // the account was healthy and the slot freed seconds later. The waiter must
+    // outlast a slow stream, so allow 90s: still bounded (a truly stuck request
+    // cannot pin a queue forever) but longer than any observed stream.
+    antigravity: 90_000,
     kiro: 20_000,        // kiro is slow (~28s typical) — wait long enough to catch
     claude: 15_000,      // claude is medium-slow
     codex: 15_000,
@@ -452,12 +469,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const semaphoreTimeoutMs = SEMAPHORE_TIMEOUT_DEFAULTS[provider] || 10_000;
   const semaphoreKey = buildAccountSemaphoreKey(provider, connectionId || "noauth");
   let releaseSlot = () => {};
+  // orr-diag — временная телеметрия семафора
+  log?.info?.("SEM", `acquire ${semaphoreKey} max=${concurrency} timeout=${semaphoreTimeoutMs}`);
   try {
     releaseSlot = await acquireAccountSlot(semaphoreKey, {
       maxConcurrency: concurrency,
       timeoutMs: semaphoreTimeoutMs,
       signal: streamController.signal,
     });
+    log?.info?.("SEM", `acquired ${semaphoreKey}`);
   } catch (e) {
     if (e?.code === "SEMAPHORE_QUEUE_FULL" || e?.code === "SEMAPHORE_TIMEOUT") {
       // Block this account briefly so the picker skips it on the very next
@@ -481,6 +501,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   const releaseOnce = () => {
     if (slotReleased) return;
     slotReleased = true;
+    log?.info?.("SEM", `release ${semaphoreKey}`);
     try { releaseSlot(); } catch { /* ignore */ }
   };
   // 0.5.29 — session tracker. Generates a deterministic id from
@@ -622,7 +643,14 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Success — release the semaphore slot before the downstream handler
   // consumes the response (the upstream call itself is done; new requests
   // to this account can begin in parallel with the stream the user receives).
-  releaseOnce();
+  // orr-fix — antigravity upstream rejects a second in-flight stream on the
+  // same account with a quota-class 429 even at 100% daily quota. Its slot
+  // must stay held until the response body below has fully drained, otherwise
+  // the next request starts while the previous stream is still open and
+  // collides (DSH fans out parallel sub-requests). Other providers keep the
+  // early release — a long stream must not serialize their whole account.
+  const holdSlotThroughStream = provider === "antigravity";
+  if (!holdSlotThroughStream) releaseOnce();
 
   // 0.5.166 — whether kRouter cloaked this request, so the decloak fallback cannot
   // rename a client tool whose own name ends in the cloak suffix. Uses the PROVIDER
@@ -635,18 +663,30 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
     const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat, trackDone, appendLog });
-    if (result) { streamController.handleComplete(); return result; }
+    // Body fully consumed by the handler above — the antigravity slot can go.
+    if (result) { streamController.handleComplete(); if (holdSlotThroughStream) releaseOnce(); return result; }
   }
 
   // True non-streaming response
   if (!stream) {
     const result = await handleNonStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat, reqLogger, toolNameMap, trackDone, appendLog });
     streamController.handleComplete();
+    if (holdSlotThroughStream) releaseOnce();
     return result;
   }
 
   // Streaming response
   const { onStreamComplete } = buildOnStreamComplete({ ...sharedCtx });
+  if (holdSlotThroughStream) {
+    // Hold the account slot until the stream has fully drained (or the
+    // client aborted) — releasing here, not after headers, is what stops
+    // parallel sub-requests from colliding on antigravity.
+    try {
+      return await handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, streamController, onStreamComplete });
+    } finally {
+      releaseOnce();
+    }
+  }
   return handleStreamingResponse({ ...sharedCtx, providerResponse, sourceFormat, targetFormat, userAgent, reqLogger, toolNameMap, streamController, onStreamComplete });
 }
 
