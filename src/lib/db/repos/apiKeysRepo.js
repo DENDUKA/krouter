@@ -119,17 +119,55 @@ export async function validateApiKey(key) {
   return row.isActive === 1 || row.isActive === true;
 }
 
+function isUniqueConstraintError(error) {
+  const code = error?.code || error?.cause?.code;
+  const message = String(error?.message || error?.cause?.message || "");
+  return (
+    code === "SQLITE_CONSTRAINT" ||
+    code === "SQLITE_CONSTRAINT_UNIQUE" ||
+    code === "SQLITE_CONSTRAINT_PRIMARYKEY" ||
+    /unique constraint/i.test(message) ||
+    /constraint failed/i.test(message)
+  );
+}
+
+// Bulk sync of the service-managed key set. The service (OpenRussiaRouter) is the source
+// of truth: it sends every non-deleted key with its desired active state.
+//
+// Two things here are load-bearing and were both wrong before:
+//
+// 1. The lookup covers EVERY row, not just `managedBy = 'openrussia-router'`. `apiKeys.key`
+//    is UNIQUE, so a key that already sits on the node under a manual/imported row (this
+//    fleet had 351 of them) does not stop existing when we narrow the SELECT. Inserting it
+//    again threw `UNIQUE constraint failed: apiKeys.key`, the transaction rolled back, and
+//    the node ended up with NONE of the service's keys — the caller only ever saw an opaque
+//    HTTP 500 while the node silently rejected every request with 401.
+//
+// 2. Such an existing-but-unmanaged row is *adopted* rather than rejected: same key value
+//    means it is the same key, and only ownership transfer makes later disable/delete reach
+//    it. Leaving it unmanaged would keep a revoked key alive on the node.
+//
+// A per-row conflict is also absorbed instead of failing the batch, so one racing insert
+// cannot cost the other 350 keys.
 export async function syncManagedApiKeys(keys) {
   const db = await getAdapter();
   let addedCount = 0;
+  let adoptedCount = 0;
   let disabledCount = 0;
   let reactivatedCount = 0;
   let deletedCount = 0;
 
   db.transaction(() => {
-    const existingRows = db.all(`SELECT * FROM apiKeys WHERE managedBy = 'openrussia-router'`);
+    const existingRows = db.all(`SELECT * FROM apiKeys`);
     const existingByValue = new Map(existingRows.map((r) => [r.key, rowToKey(r)]));
     const incomingValues = new Set(keys.map((k) => k.key));
+
+    const adopt = (existing, incomingKey, desiredActive) => {
+      db.run(
+        `UPDATE apiKeys SET managedBy = 'openrussia-router', name = ?, isActive = ?, visibleInDashboard = 1 WHERE id = ?`,
+        [incomingKey.name, desiredActive ? 1 : 0, existing.id]
+      );
+    };
 
     for (const incomingKey of keys) {
       const desiredActive = incomingKey.isActive === undefined ? true : Boolean(incomingKey.isActive);
@@ -146,11 +184,23 @@ export async function syncManagedApiKeys(keys) {
           visibleInDashboard: incomingKey.visibleInDashboard !== undefined ? (incomingKey.visibleInDashboard ? 1 : 0) : null,
           createdAt: new Date().toISOString(),
         };
-        db.run(
-          `INSERT INTO apiKeys(id, key, name, machineId, isActive, managedBy, visibleInDashboard, createdAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
-          [newApiKey.id, newApiKey.key, newApiKey.name, newApiKey.machineId, newApiKey.isActive, newApiKey.managedBy, newApiKey.visibleInDashboard, newApiKey.createdAt]
-        );
-        addedCount++;
+        try {
+          db.run(
+            `INSERT INTO apiKeys(id, key, name, machineId, isActive, managedBy, visibleInDashboard, createdAt) VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
+            [newApiKey.id, newApiKey.key, newApiKey.name, newApiKey.machineId, newApiKey.isActive, newApiKey.managedBy, newApiKey.visibleInDashboard, newApiKey.createdAt]
+          );
+          addedCount++;
+        } catch (error) {
+          if (!isUniqueConstraintError(error)) throw error;
+          // Raced with a concurrent insert of the same value — adopt whatever landed.
+          const raced = rowToKey(db.get(`SELECT * FROM apiKeys WHERE key = ?`, [incomingKey.key]));
+          if (!raced) throw error;
+          adopt(raced, incomingKey, desiredActive);
+          adoptedCount++;
+        }
+      } else if (existing.managedBy !== "openrussia-router") {
+        adopt(existing, incomingKey, desiredActive);
+        adoptedCount++;
       } else if (desiredActive && !existing.isActive) {
         db.run(`UPDATE apiKeys SET isActive = 1 WHERE id = ?`, [existing.id]);
         reactivatedCount++;
@@ -160,13 +210,15 @@ export async function syncManagedApiKeys(keys) {
       }
     }
 
+    // Only keys the service owns are eligible for removal. Rows that stayed manual (never
+    // matched an incoming key) belong to somebody else and must not be touched.
     for (const existing of existingByValue.values()) {
-      if (!incomingValues.has(existing.key)) {
+      if (existing.managedBy === "openrussia-router" && !incomingValues.has(existing.key)) {
         db.run(`DELETE FROM apiKeys WHERE id = ?`, [existing.id]);
         deletedCount++;
       }
     }
   });
 
-  return { addedCount, disabledCount, reactivatedCount, deletedCount };
+  return { addedCount, adoptedCount, disabledCount, reactivatedCount, deletedCount };
 }

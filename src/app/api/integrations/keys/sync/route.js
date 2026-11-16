@@ -44,7 +44,7 @@ export async function POST(request) {
     const result = await syncManagedApiKeys(validKeys);
 
     console.info(
-      `[Integrations][Keys] action=sync managedBy=openrussia-router result=success added=${result.addedCount} disabled=${result.disabledCount} reactivated=${result.reactivatedCount} deleted=${result.deletedCount}`
+      `[Integrations][Keys] action=sync managedBy=openrussia-router result=success added=${result.addedCount} adopted=${result.adoptedCount} disabled=${result.disabledCount} reactivated=${result.reactivatedCount} deleted=${result.deletedCount}`
     );
 
     return NextResponse.json(result, { status: 200 });
