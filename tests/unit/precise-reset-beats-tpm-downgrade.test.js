@@ -67,16 +67,25 @@ describe("markAccountUnavailable: precise reset vs TPM downgrade", () => {
     expect(lockMs(db.rows.cx2, "gpt-5.5")).toBe(MAX_QUOTA_RESET_COOLDOWN_MS);
   });
 
-  it("keeps the TPM downgrade for a rate-limit 429 that carries no reset", async () => {
+  it("keeps the TPM downgrade for a rate-limit 429 that carries no reset, once the streak confirms it", async () => {
+    // 2026-11-16 — a single 429 no longer parks the account; the streak must reach
+    // RATE_LIMIT_STREAK_THRESHOLD first. See antigravity-ratelimit-streak.test.js.
     db.rows.ag1 = { id: "ag1", provider: "antigravity" };
-    const out = await markAccountUnavailable("ag1", 429, "Individual quota reached", "antigravity", "gemini-3-pro", null);
+    let out;
+    for (let i = 0; i < 5; i++) {
+      out = await markAccountUnavailable("ag1", 429, "Individual quota reached", "antigravity", "gemini-3-pro", null);
+    }
     expect(out.cooldownMs).toBe(90 * 1000);
-    expect(db.rows.ag1.lastError).toMatch(/TPM/);
+    expect(db.rows.ag1.lastError).toMatch(/TPM|per-minute/);
   });
 
-  it("ignores a reset that already passed", async () => {
+  it("passes a lone blip straight through instead of locking", async () => {
+    // The window is bursty and self-healing: one 429 must cost nothing, so the caller
+    // retries against Google rather than against a local lock.
     db.rows.ag2 = { id: "ag2", provider: "antigravity" };
     const out = await markAccountUnavailable("ag2", 429, "Too many requests", "antigravity", "gemini-3-pro", NOW - 1000);
-    expect(out.cooldownMs).toBe(90 * 1000);
+    expect(out.shouldFallback).toBe(false);
+    expect(out.cooldownMs).toBe(0);
+    expect(db.rows.ag2["modelLock_gemini-3-pro"]).toBeUndefined();
   });
 });

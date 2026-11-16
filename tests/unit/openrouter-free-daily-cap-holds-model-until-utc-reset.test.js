@@ -214,9 +214,14 @@ describe("markAccountUnavailable with the OpenRouter free-model daily cap", () =
     expect(outcome.cooldownMs).toBeLessThan(5 * 60 * 1000);
   });
 
-  it("keeps the per-minute free cap on the short TPM cooldown", async () => {
+  it("keeps the per-minute free cap on the short TPM cooldown once the streak confirms it", async () => {
+    // 2026-11-16 — one 429 no longer parks the model; the streak must reach
+    // RATE_LIMIT_STREAK_THRESHOLD first. See antigravity-ratelimit-streak.test.js.
     const { text } = await upstreamError(429, PER_MINUTE_BODY);
-    const outcome = await markAccountUnavailable("conn-min", 429, text, "openrouter", FREE_MODEL);
+    let outcome;
+    for (let i = 0; i < 5; i++) {
+      outcome = await markAccountUnavailable("conn-min", 429, text, "openrouter", FREE_MODEL);
+    }
 
     expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 90_000 });
     expect(db.rows["conn-min"][`modelLock_${FREE_MODEL}`]).toBe(new Date(NOW + 90_000).toISOString());
@@ -224,7 +229,10 @@ describe("markAccountUnavailable with the OpenRouter free-model daily cap", () =
 
   it("keeps an upstream provider 429 on its current handling", async () => {
     const { text } = await upstreamError(429, UPSTREAM_BODY);
-    const outcome = await markAccountUnavailable("conn-up", 429, text, "openrouter", FREE_MODEL);
+    let outcome;
+    for (let i = 0; i < 5; i++) {
+      outcome = await markAccountUnavailable("conn-up", 429, text, "openrouter", FREE_MODEL);
+    }
 
     expect(outcome).toMatchObject({ shouldFallback: true, cooldownMs: 90_000 });
     expect(db.rows["conn-up"].modelLock___all).toBeUndefined();

@@ -162,6 +162,47 @@ export function describeTpmExhaustion({ inputTokens, promptChars, toolCount, ret
     + "send fewer tools or space the calls out.";
 }
 
+// Per-connection streak of consecutive 429s, used to decide whether the account deserves a
+// lock. A lone 429 is a burst blip that clears in seconds; locking on it costs the whole
+// minute for nothing AND turns one upstream rejection into a wave of local ones, because
+// every subsequent request hits the lock instead of Google and reports the same text.
+//
+// The counter is time-windowed rather than a plain increment: 429s spread over an hour are
+// independent blips, while five inside a couple of minutes mean the minute bucket really is
+// spent. A success clears the streak — proof the window is free again.
+const RATE_LIMIT_STREAK_THRESHOLD = 5;
+const RATE_LIMIT_STREAK_WINDOW_MS = 2 * 60 * 1000;
+
+const rateLimitStreaks = new Map();
+
+function pruneStreak(connectionId, nowMs) {
+  const hits = rateLimitStreaks.get(connectionId);
+  if (!hits) return [];
+  const fresh = hits.filter((ts) => nowMs - ts <= RATE_LIMIT_STREAK_WINDOW_MS);
+  if (fresh.length === 0) rateLimitStreaks.delete(connectionId);
+  else rateLimitStreaks.set(connectionId, fresh);
+  return fresh;
+}
+
+export function recordRateLimitHit(connectionId, nowMs = Date.now()) {
+  if (!connectionId) return;
+  const fresh = pruneStreak(connectionId, nowMs);
+  fresh.push(nowMs);
+  rateLimitStreaks.set(connectionId, fresh);
+}
+
+export function shouldLockForRateLimit(connectionId, nowMs = Date.now()) {
+  if (!connectionId) return false;
+  return pruneStreak(connectionId, nowMs).length >= RATE_LIMIT_STREAK_THRESHOLD;
+}
+
+export function resetRateLimitStreak(connectionId) {
+  if (connectionId) rateLimitStreaks.delete(connectionId);
+}
+
+// For tests
+export function _clearRateLimitStreaks() { rateLimitStreaks.clear(); }
+
 // Per-account credits failure tracker. After CREDITS_DISABLE_THRESHOLD
 // consecutive credits errors, recommend disabling that account for
 // CREDITS_COOLDOWN_MS. Reset on any successful call.
@@ -196,4 +237,4 @@ export function resetCreditsFailure(authKey) {
 
 // For tests
 export function _clearCreditsState() { creditsFailureMap.clear(); }
-export { SHORT_COOLDOWN_MS, FULL_QUOTA_COOLDOWN_MS };
+export { SHORT_COOLDOWN_MS, FULL_QUOTA_COOLDOWN_MS, RATE_LIMIT_STREAK_THRESHOLD, RATE_LIMIT_STREAK_WINDOW_MS };

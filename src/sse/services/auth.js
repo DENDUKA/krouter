@@ -7,7 +7,7 @@ import { selectAccount, getRoundRobinState } from "open-sse/services/accountSele
 import { getEffectiveFallbackStrategy } from "open-sse/config/providerStrategy.js";
 import { scoreOf } from "@/shared/services/connectionHealth";
 import { MAX_QUOTA_RESET_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
-import { describeTpmExhaustion } from "open-sse/services/antigravity429Engine.js";
+import { describeTpmExhaustion, recordRateLimitHit, shouldLockForRateLimit, resetRateLimitStreak } from "open-sse/services/antigravity429Engine.js";
 import { resolveProviderId, FREE_PROVIDERS, ANTHROPIC_COMPATIBLE_PREFIX } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
@@ -523,12 +523,30 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       // skip threshold, the 429 isn't about daily budget — it's TPM.
       const dailyOk = isAccountAboveThreshold(provider, connectionId, model, TPM_HEALTHY_QUOTA_THRESHOLD);
       if (dailyOk) {
-        isTpmRateLimit = true;
-        cooldownMs = TPM_COOLDOWN_MS;
-        shouldFallback = true;
-        accountLock = false;
-        permanent = false;
-        newBackoffLevel = 0;
+        // 2026-11-16 — a lone 429 is a burst blip, not a spent window. Locking on the first
+        // one blocked the model for 90s for every caller, so one upstream rejection became a
+        // wave: the next requests hit the lock instead of Google and repeated the same text.
+        // Only a run of failures inside a short window means the bucket is genuinely gone.
+        recordRateLimitHit(connectionId);
+        const streakConfirmed = shouldLockForRateLimit(connectionId);
+
+        if (streakConfirmed) {
+          isTpmRateLimit = true;
+          cooldownMs = TPM_COOLDOWN_MS;
+          shouldFallback = true;
+          accountLock = false;
+          permanent = false;
+          newBackoffLevel = 0;
+        } else {
+          // Let the caller retry straight away: no cooldown, no lock, no DB write. The
+          // request goes back to Google, which is the only authority on whether the window
+          // is really closed.
+          shouldFallback = false;
+          cooldownMs = 0;
+          accountLock = false;
+          permanent = false;
+          newBackoffLevel = 0;
+        }
       }
     }
 
@@ -650,6 +668,9 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
  */
 export async function clearAccountError(connectionId, currentConnection, model = null) {
   if (!connectionId || connectionId === "noauth") return;
+  // A successful call proves the per-minute window is free again; carrying the streak
+  // forward would lock the account on the next unrelated blip.
+  resetRateLimitStreak(connectionId);
   const conn = currentConnection._connection || currentConnection;
   const now = Date.now();
   const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
