@@ -113,18 +113,22 @@ export function decide429(category, retryAfterMs) {
 
 // Human-readable explanation for a 429 that the daily-quota cache says should not happen.
 //
-// The previous wording — "TPM rate-limited (per-minute window) — daily quota healthy,
-// retries in ~90s" — was technically about the right mechanism but actively misleading, and
-// it cost real debugging time. It read as a benign hiccup on a healthy account, so every
-// investigation went to the provider dashboard, found 100% of the 5-hour quota and concluded
-// the message was impossible. The missing half is that Antigravity's per-minute window is
-// measured in TOKENS, and dsh sends enormous ones: 189 tool declarations, 1.4–1.6 MB of JSON,
-// measured at up to 747,349 input tokens for a single call. One such call can drain an entire
-// minute's budget, so the next call inside that minute is refused — with a one-word prompt.
+// History matters here, because this string was wrong twice and each version sent debugging
+// down a blind alley:
 //
-// So the message says what the request actually contained. Saying "your one-word prompt is
-// fine, your 189 tool schemas are not" is the difference between a dead end and a fix
-// (trim the tool set, or spread calls out).
+//   v1 — "TPM rate-limited (per-minute window) — daily quota healthy, retries in ~90s".
+//        Read as a benign hiccup on a healthy account, so every investigation opened the
+//        provider dashboard, saw 100% of the 5-hour quota, and concluded the message was
+//        impossible.
+//   v2 — "…one large request can consume a whole minute's window; send fewer tools".
+//        Asserted a cause that measurement then contradicted: a 166 KB / 189-tool request
+//        now succeeds five times in a row, while the failure that was actually captured
+//        (`_originalSize: 93944`, 38 tools — smaller by every measure) was refused. Sending
+//        a smaller request did not make it pass; the streak gate and a short park did.
+//
+// So v3 states only what is measured: the per-minute budget is separate from the daily one,
+// the daily one will keep showing 100%, the request is documented for the record — and the
+// size is explicitly NOT offered as the explanation, because we do not have one.
 //
 // @param {object} payload
 // @param {number|null} payload.inputTokens  tokens Google counted for the request, if known
@@ -133,33 +137,34 @@ export function decide429(category, retryAfterMs) {
 // @param {number|null} payload.retryAfterMs time until the window resets, if known
 // @returns {string}
 export function describeTpmExhaustion({ inputTokens, promptChars, toolCount, retryAfterMs } = {}) {
-  const parts = [];
+  // Describe the request as a fact, not as a verdict. This is the shape operators recognise
+  // when they correlate the log line with a session, and it is what proves "I only sent
+  // Привет" wrong about the *request* without claiming the prompt size caused anything.
+  const shape = [];
 
   if (Number.isFinite(inputTokens) && inputTokens > 0) {
-    parts.push(`${Math.round(inputTokens)} input tokens`);
-  } else {
-    parts.push("per-minute token window");
+    shape.push(`${Math.round(inputTokens)} input tokens`);
   }
-
-  // Name the payload. Tools win when present because that is what actually fills the request:
-  // a 189-tool schema dwarfs any prompt a human types. Only when tools are absent does the
-  // prompt itself become the plausible cause.
   if (Number.isFinite(toolCount) && toolCount > 0) {
-    parts.push(`${toolCount} tools`);
-  } else if (Number.isFinite(promptChars) && promptChars >= 100_000) {
-    parts.push(`~${Math.round(promptChars / 1000)}k chars of prompt`);
+    shape.push(`${toolCount} tools`);
+  }
+  if (Number.isFinite(promptChars) && promptChars > 0) {
+    shape.push(promptChars >= 100_000
+      ? `~${Math.round(promptChars / 1000)}k chars of prompt`
+      : `${promptChars} chars of prompt`);
   }
 
   const retry = Number.isFinite(retryAfterMs) && retryAfterMs > 0
-    ? `resets in ${Math.round(retryAfterMs / 1000)}s`
-    : "retry shortly";
+    ? `next attempt in ${Math.round(retryAfterMs / 1000)}s`
+    : "retrying shortly";
 
-  const payload = parts.join(" + ");
+  const detail = shape.length > 0 ? ` (request: ${shape.join(", ")})` : "";
 
-  return `Antigravity per-minute token window exhausted (${payload}) — ${retry}. `
-    + "This is the per-minute budget, not the daily/5-hour quota: that one stays at 100% and "
-    + "will keep looking healthy. A single large request can consume a whole minute's window; "
-    + "send fewer tools or space the calls out.";
+  return `Antigravity refused the request with a 429${detail} — ${retry}. `
+    + "Google reports this as the per-minute budget, which is tracked separately from the "
+    + "daily/5-hour quota: that one stays at 100% and will keep looking healthy, so it is not "
+    + "evidence that the message is wrong. Request size has not been shown to predict this — "
+    + "equally large requests succeed — so trim nothing on account of this line.";
 }
 
 // Per-connection streak of consecutive 429s, used to decide whether the account deserves a
