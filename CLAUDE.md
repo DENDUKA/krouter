@@ -30,3 +30,38 @@ to Google's `429 "Resource has been exhausted (e.g. check quota)."`.
   `precise-reset-beats-tpm-downgrade.test.js`. They are **vitest** — `node --test` reports the
   file as failing with a bogus `Cannot read properties of undefined (reading 'config')`.
 
+## Antigravity 429 — content filter, not quota (2026-11-17)
+
+The most expensive misunderstanding in this codebase: the same
+`429 "Resource has been exhausted (e.g. check quota)."` body is also what Google returns when
+it simply refuses to serve a request because of what the prompt *says*. Every symptom then
+points at quota while the quota is fine, and the handler faithfully reports "per-minute
+window", sending the next investigation to the provider dashboard that shows 100%.
+
+How it was proved, and the shape of the evidence to look for:
+
+- **Latency is the tell.** A real quota rejection cannot answer in 100-650 ms. Every refused
+  request came back in that window; every accepted one took 8-60 s. If a 429 is fast, it is a
+  verdict on the request, not a measurement of a budget.
+- **A single sentence flips it.** Capture the exact outbound body of a failing turn, then
+  replace one sentence at a time. `The browser provides no implicit DOM, route, or screenshot
+  context.` inside `systemInstruction` was the trigger: swapping only that sentence in the
+  captured 6480-char prompt turned 429 into 200, and restoring it turned 200 back into 429.
+  Quota read 97.6% the whole time. `This is a provider-side fault` style wording was wrong.
+- **`ANTIGRAVITY_PROMPT_REWRITES` is where such sentences get neutralised**, and it is applied
+  to `systemInstruction` and `contents` separately — a rule that only touches one of them
+  will look correct and change nothing. `obfuscateBodyStrings` is applied to both now.
+- **Zero-width joiners do NOT defeat this filter.** `antigravityObfuscation.js` splits a
+  sensitive word with U+200D; shipped and verified — the ZWJ was present in the outgoing body
+  and Google still refused. It normalises before matching. Use a real substitution (rebrand
+  the token) for prompts, and keep ZWJ only for tool names, where it does work.
+- **Do not "fix" it by trimming the request.** Payload size, tool count, `maxOutputTokens`,
+  `thinkingConfig` and `toolConfig` were each replayed with one field changed and none of them
+  mattered. Shrinking the prompt hides the bug until the next sentence trips the filter.
+
+Concurrency, measured the same way: the note that used to sit on
+`PROVIDER_CONCURRENCY_DEFAULTS.antigravity = 1` claimed upstream rejects a second in-flight
+stream. It does not — 2 and 3 parallel streams all returned 200 (20-37 s each). The account
+now allows 2, with `SEMAPHORE_TIMEOUT_DEFAULTS.antigravity = 90_000` so a waiter outlasts the
+60-100 s streams instead of surfacing `503 Account busy, try another`.
+
