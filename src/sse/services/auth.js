@@ -7,6 +7,7 @@ import { selectAccount, getRoundRobinState } from "open-sse/services/accountSele
 import { getEffectiveFallbackStrategy } from "open-sse/config/providerStrategy.js";
 import { scoreOf } from "@/shared/services/connectionHealth";
 import { MAX_QUOTA_RESET_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { describeTpmExhaustion } from "open-sse/services/antigravity429Engine.js";
 import { resolveProviderId, FREE_PROVIDERS, ANTHROPIC_COMPATIBLE_PREFIX } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
@@ -431,7 +432,7 @@ function extractVerificationUrl(errorText) {
   return match ? match[0] : null;
 }
 
-export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
+export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, requestShape = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
@@ -596,7 +597,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
       // truncated error and has no idea what to do.
       lastError: accountLock && verifyUrl
         ? `Verify your account: ${verifyUrl}`
-        : (spendLimitHold?.reason || freeDailyHold?.reason || (_tpmRateLimit_for_reason ? `TPM rate-limited (per-minute window) — daily quota healthy, retries in ~90s` : reason)),
+        : (spendLimitHold?.reason || freeDailyHold?.reason || (_tpmRateLimit_for_reason ? describeTpmExhaustion({
+            inputTokens: requestShape?.inputTokens ?? null,
+            promptChars: requestShape?.promptChars ?? null,
+            toolCount: requestShape?.toolCount ?? null,
+            retryAfterMs: cooldownMs,
+          }) : reason)),
       errorCode: status,
       lastErrorAt: new Date().toISOString(),
       backoffLevel: newBackoffLevel ?? backoffLevel,

@@ -48,6 +48,31 @@ import {
 // — combos referencing combos referencing combos is already a smell.
 const MAX_COMBO_RECURSION_DEPTH = 3;
 
+// Rough size of the conversation the caller sent us, used ONLY to explain a
+// per-minute-window refusal. Deliberately an estimate: the authoritative token
+// count lives upstream, and this must never be used for billing or limiting.
+function estimatePromptChars(body) {
+  if (!body) return 0;
+  let chars = 0;
+  const walk = (node, depth) => {
+    // Guard against pathological/cyclic payloads; chat bodies are shallow.
+    if (depth > 8 || node == null) return;
+    if (typeof node === "string") { chars += node.length; return; }
+    if (Array.isArray(node)) { for (const item of node) walk(item, depth + 1); return; }
+    if (typeof node === "object") {
+      // Tool schemas are counted separately by the caller; skip them here so the
+      // "prompt" figure means the conversation, not the tool declarations.
+      for (const [k, v] of Object.entries(node)) {
+        if (k === "tools") continue;
+        walk(v, depth + 1);
+      }
+    }
+  };
+  walk(body.messages ?? body.input ?? null, 0);
+  walk(body.system ?? null, 0);
+  return chars;
+}
+
 /**
  * Handle chat completion request
  * Supports: OpenAI, Claude, Gemini, OpenAI Responses API formats
@@ -521,8 +546,17 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       }
     }
 
-    // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+    // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs).
+    // The request shape travels with it so a per-minute-window refusal can say WHAT filled the
+    // window. Without it the stored error read "TPM rate-limited ... daily quota healthy",
+    // which looked impossible next to a one-word prompt while the real payload was 189 tool
+    // schemas and hundreds of thousands of input tokens.
+    const requestShape = {
+      toolCount: Array.isArray(body?.tools) ? body.tools.length : 0,
+      promptChars: estimatePromptChars(body),
+      inputTokens: result?.usage?.prompt_tokens ?? null,
+    };
+    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs, requestShape);
 
     if (shouldFallback) {
       log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);

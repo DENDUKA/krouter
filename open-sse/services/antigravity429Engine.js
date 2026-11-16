@@ -111,11 +111,61 @@ export function decide429(category, retryAfterMs) {
   }
 }
 
+// Human-readable explanation for a 429 that the daily-quota cache says should not happen.
+//
+// The previous wording — "TPM rate-limited (per-minute window) — daily quota healthy,
+// retries in ~90s" — was technically about the right mechanism but actively misleading, and
+// it cost real debugging time. It read as a benign hiccup on a healthy account, so every
+// investigation went to the provider dashboard, found 100% of the 5-hour quota and concluded
+// the message was impossible. The missing half is that Antigravity's per-minute window is
+// measured in TOKENS, and dsh sends enormous ones: 189 tool declarations, 1.4–1.6 MB of JSON,
+// measured at up to 747,349 input tokens for a single call. One such call can drain an entire
+// minute's budget, so the next call inside that minute is refused — with a one-word prompt.
+//
+// So the message says what the request actually contained. Saying "your one-word prompt is
+// fine, your 189 tool schemas are not" is the difference between a dead end and a fix
+// (trim the tool set, or spread calls out).
+//
+// @param {object} payload
+// @param {number|null} payload.inputTokens  tokens Google counted for the request, if known
+// @param {number|null} payload.promptChars  characters of the user prompt, if known
+// @param {number|null} payload.toolCount    number of tool declarations, if known
+// @param {number|null} payload.retryAfterMs time until the window resets, if known
+// @returns {string}
+export function describeTpmExhaustion({ inputTokens, promptChars, toolCount, retryAfterMs } = {}) {
+  const parts = [];
+
+  if (Number.isFinite(inputTokens) && inputTokens > 0) {
+    parts.push(`${Math.round(inputTokens)} input tokens`);
+  } else {
+    parts.push("per-minute token window");
+  }
+
+  // Name the payload. Tools win when present because that is what actually fills the request:
+  // a 189-tool schema dwarfs any prompt a human types. Only when tools are absent does the
+  // prompt itself become the plausible cause.
+  if (Number.isFinite(toolCount) && toolCount > 0) {
+    parts.push(`${toolCount} tools`);
+  } else if (Number.isFinite(promptChars) && promptChars >= 100_000) {
+    parts.push(`~${Math.round(promptChars / 1000)}k chars of prompt`);
+  }
+
+  const retry = Number.isFinite(retryAfterMs) && retryAfterMs > 0
+    ? `resets in ${Math.round(retryAfterMs / 1000)}s`
+    : "retry shortly";
+
+  const payload = parts.join(" + ");
+
+  return `Antigravity per-minute token window exhausted (${payload}) — ${retry}. `
+    + "This is the per-minute budget, not the daily/5-hour quota: that one stays at 100% and "
+    + "will keep looking healthy. A single large request can consume a whole minute's window; "
+    + "send fewer tools or space the calls out.";
+}
+
 // Per-account credits failure tracker. After CREDITS_DISABLE_THRESHOLD
 // consecutive credits errors, recommend disabling that account for
 // CREDITS_COOLDOWN_MS. Reset on any successful call.
-const creditsFailureMap = new Map();
-const CREDITS_DISABLE_THRESHOLD = 3;
+const creditsFailureMap = new Map();const CREDITS_DISABLE_THRESHOLD = 3;
 const CREDITS_COOLDOWN_MS = 5 * 60 * 60 * 1000;
 
 export function recordCreditsFailure(authKey) {
