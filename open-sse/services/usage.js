@@ -373,7 +373,7 @@ async function getAntigravityUsage(accessToken, providerSpecificData, proxyOptio
           "User-Agent": ANTIGRAVITY_CONFIG.userAgent,
           "Content-Type": "application/json",
           "X-Client-Name": "antigravity",
-          "X-Client-Version": "1.107.0",
+          "X-Client-Version": "2.32.1",
           "x-request-source": "local", // MITM bypass
         },
         body: JSON.stringify({

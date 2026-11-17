@@ -1,18 +1,9 @@
 {
-  "_note": "Captured live from v1internal:fetchAvailableModels for a real Antigravity account on 2026-11-11. The roster is server-side dynamic and flips with experimentIds, so this is a snapshot of ONE arm, not a contract. Its job is to make catalog drift fail a test instead of reaching users as a 404.",
-  "capturedAt": "2026-11-11",
-  "experimentIdCount": 61,
-  "defaultAgentModelId": "claude-opus-5-5-low",
-  "commandModelIds": [
-    "gemini-3-flash"
-  ],
-  "tabModelIds": [
-    "chat_20706",
-    "chat_23310"
-  ],
-  "imageGenerationModelIds": [
-    "gemini-3.1-flash-image"
-  ],
+  "_comment": "Real v1internal:fetchAvailableModels capture for a live Antigravity account. 2026-11-17 — refreshed after the User-Agent discovery: the roster is gated by the client UA ALONE. With `antigravity/1.107.0 <os>/<arch>` this endpoint serves 21 ids and NO Gemini 4 model; with the real app UA `antigravity/2.32.1.0 (aidev_client; os_type=windows; arch=amd64; cl=1003475615)` it serves 34, including Argon low/medium/high and Hydrogen low/medium/high/xhigh. The request body is irrelevant: {project} and {} return the identical roster, so the earlier belief that the project id was truncating the list was wrong. Note this arm now serves the 3.8 tiers as distinct ids AND the shared gemini-3.8-flash-tiered upstream; the catalog keeps mapping the tiers to -tiered with thinkingConfig, which still answers 200. The roster is server-side dynamic (it flips with experimentIds), so treat this as a snapshot, not a contract — its job is to make drift fail a test instead of reaching users as a 404.",
+  "capturedAt": "2026-11-17",
+  "capturedWith": "antigravity/2.32.1.0 (aidev_client; os_type=windows; arch=amd64; cl=1003475615)",
+  "requestBody": "{}",
+  "experimentIdCount": 90,
   "servedModelIds": [
     "chat_20706",
     "chat_23310",
@@ -30,7 +21,21 @@
     "gemini-3.1-flash-image",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-3.8-flash-high",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium",
     "gemini-3.8-flash-tiered",
+    "gemini-4-argon-high",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-carbon-disabled",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-sonar",
+    "gemini-4-hydrogen-tiered-high",
+    "gemini-4-hydrogen-tiered-xhigh",
+    "gemini-4-hydrogen-xhigh",
     "gpt-oss-120b-medium",
     "tab_flash_lite_preview",
     "tab_jump_flash_lite_preview"

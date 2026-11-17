@@ -235,9 +235,9 @@ const PROVIDER_MODELS_CONFIG = {
           headers: {
             "Authorization": `Bearer ${accessToken}`,
             "Content-Type": "application/json",
-            "User-Agent": "antigravity/1.107.0",
+            "User-Agent": `antigravity/2.32.1.0 (aidev_client; os_type=${process.platform === "win32" ? "windows" : process.platform === "darwin" ? "darwin" : "linux"}; arch=${process.arch === "x64" ? "amd64" : process.arch === "ia32" ? "386" : process.arch}; cl=1003475615)`,
             "X-Client-Name": "antigravity",
-            "X-Client-Version": "1.107.0",
+            "X-Client-Version": "2.32.1",
             "x-request-source": "local",
           },
           body: JSON.stringify(projectId ? { project: projectId } : {}),

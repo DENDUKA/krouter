@@ -47,10 +47,15 @@ describe("the tiered families resolve to the id Google serves", () => {
     expect(served.has("gemini-3.8-flash-tiered")).toBe(true);
   });
 
-  it("the tier ids themselves are NOT served, which is the whole point", () => {
-    for (const id of ["gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low"]) {
-      expect(served.has(id)).toBe(false);
-    }
+  it("the shared -tiered upstream is the shape the catalog relies on, whether or not the arm also serves the tiers", () => {
+    // 2026-11-17 — this assertion used to claim the 3.8 tier ids were NOT served at all,
+    // which was true for the roster the pre-2.32.1 User-Agent produced. The arm the real
+    // app UA reveals serves BOTH the distinct tiers and `gemini-3.8-flash-tiered`, so the
+    // claim no longer holds as written. What still matters — and all the catalog depends
+    // on — is that the -tiered upstream answers, because that is what the tiers are mapped
+    // onto; an arm that only serves -tiered must keep working. Verified live across both
+    // arms: `...  model=gemini-3.8-flash-tiered  -> 200`.
+    expect(served.has("gemini-3.8-flash-tiered")).toBe(true);
   });
 
   it("an id with no mapping is passed through untouched", () => {
@@ -108,8 +113,10 @@ describe("the catalog is measured against the live roster", () => {
   // Ids this account's arm does not serve. Kept in the catalog on purpose: the roster is
   // an experiment-arm thing, a user may have a saved combo or alias pointing at one, and
   // a request for one now fails fast with an honest 404 (see parked-account-status).
+  // 2026-11-17 — `gemini-4-argon-high` moved OUT of this set: the roster was only ever
+  // truncated because kRouter sent the pre-2.32.1 User-Agent. With the real app UA the
+  // endpoint serves all three Argon tiers and all four Hydrogen tiers.
   const KNOWN_UNSERVED = new Set([
-    "gemini-4-argon-high",
     "gemini-3.7-flash-high", "gemini-3.7-flash-medium", "gemini-3.7-flash-low",
     "gemini-3.6-flash-high", "gemini-3.6-flash-medium", "gemini-3.6-flash-low",
     "gemini-3.1-pro-high", "gemini-pro-agent", "gemini-3.1-pro-low",
@@ -124,9 +131,19 @@ describe("the catalog is measured against the live roster", () => {
   });
 
   it("the ids the roster serves as chat models are published", () => {
-    // chat_*/tab_* are tab-completion lanes and -tiered is an upstream, not a user choice.
+    // chat_*/tab_* are tab-completion lanes; -tiered is a shared upstream, not a user
+    // choice; -disabled is Google's placeholder for a model the arm has switched off
+    // (it is served with quotaInfo: null and 404s on generateContent). None of those
+    // belong in the picker.
     const isUserFacing = (id) =>
-      !id.startsWith("chat_") && !id.startsWith("tab_") && !id.endsWith("-tiered");
+      !id.startsWith("chat_") &&
+      !id.startsWith("tab_") &&
+      !id.includes("-tiered") &&
+      !id.endsWith("-disabled") &&
+      // This arm serves the 3.8 tiers twice: as distinct ids and as the shared -tiered
+      // upstream the catalog maps them onto. Both work; publishing the -tiered mapping
+      // is the shape that survives an arm that only serves -tiered.
+      !/^gemini-3\.\d-flash-(high|medium|low)$/.test(id);
     const published = new Set(ag.map(upstreamOf));
     const missing = roster.servedModelIds.filter((id) => isUserFacing(id) && !published.has(id));
     expect(missing).toEqual([]);

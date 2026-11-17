@@ -55,8 +55,38 @@ export function getPlatformEnum() {
   return PLATFORM.UNSPECIFIED;
 }
 
+// 2026-11-17 — measured on a live account with a mitmproxy capture of the real
+// Antigravity 2.32.1 desktop app. The User-Agent is what gates the Gemini 4
+// lineup, and nothing else does: the same token, host and body served 21 models
+// (no Argon) for `antigravity/1.107.0 <os>/<arch>` and 34 models (Argon low/
+// medium/high, Hydrogen low/medium/high/xhigh) for the exact string below.
+// The body is irrelevant — `{project}` and `{}` return the same roster.
+//
+// Format is `<app>/<version>.0 (aidev_client; os_type=<os>; arch=<arch>; cl=<n>)`.
+// The trailing `cl` value is a client build id the app reports; 1003475615 is
+// the one captured from 2.32.1 and is kept verbatim.
+export const ANTIGRAVITY_APP_VERSION = "2.32.1";
+
+function antigravityOsType() {
+  const os = platform();
+  if (os === "win32") return "windows";
+  if (os === "darwin") return "darwin";
+  return os || "linux";
+}
+
+function antigravityArch() {
+  const architecture = arch();
+  if (architecture === "x64") return "amd64";
+  if (architecture === "ia32") return "386";
+  return architecture || "amd64";
+}
+
+export function getAntigravityUserAgent() {
+  return `antigravity/${ANTIGRAVITY_APP_VERSION}.0 (aidev_client; os_type=${antigravityOsType()}; arch=${antigravityArch()}; cl=1003475615)`;
+}
+
 export function getPlatformUserAgent() {
-  return `antigravity/1.104.0 ${platform()}/${arch()}`;
+  return getAntigravityUserAgent();
 }
 
 export const CLIENT_METADATA = {
@@ -126,7 +156,7 @@ export const AG_DEFAULT_TOOLS = new Set([
 
 // Antigravity chat/stream headers
 export const ANTIGRAVITY_HEADERS = {
-  "User-Agent": `antigravity/1.107.0 ${platform()}/${arch()}`
+  "User-Agent": getAntigravityUserAgent()
 };
 
 // Cloud Code Assist API
@@ -150,7 +180,7 @@ export const LOAD_CODE_ASSIST_HEADERS = {
 // the real Antigravity IDE User-Agent when provisioning for antigravity.
 export const ANTIGRAVITY_LOAD_CODE_ASSIST_HEADERS = {
   "Content-Type": "application/json",
-  "User-Agent": `antigravity/1.107.0 ${platform()}/${arch()}`,
+  "User-Agent": getAntigravityUserAgent(),
 };
 
 export const LOAD_CODE_ASSIST_METADATA = {

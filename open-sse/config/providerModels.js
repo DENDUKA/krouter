@@ -136,7 +136,30 @@ export const PROVIDER_MODELS = {
     // registry loader; kRouter has no such parser, so a fused string would go on the
     // wire verbatim. The 3.8 family has one wire model per tier, 3.7 and 3.6 share a
     // single "-tiered" wire model.
+    // 2026-11-17 — Gemini 4 Carbon / Argon / Hydrogen, read off a mitmproxy capture
+    // of Antigravity 2.32.1 against a live account. The whole Gemini 4 roster is
+    // gated behind the client User-Agent alone (see appConstants
+    // getAntigravityUserAgent): with the old `antigravity/1.107.0 <os>/<arch>` UA
+    // fetchAvailableModels served 21 models and none of these; with the 2.32.1
+    // `aidev_client` UA it serves 34 and all of them. Body is irrelevant.
+    //
+    // Unlike the 3.8 family, each tier is its OWN wire model here — there is no
+    // shared `-tiered` id to point upstreamModelId at, so the tier lives in the id
+    // and must be sent verbatim. `gemini-4-carbon-disabled` is served with
+    // quotaInfo: null and is deliberately NOT catalogued: it is the disabled
+    // placeholder Google ships, not a callable model.
     { id: "gemini-4-argon-high", name: "Gemini 4 Argon (High)", thinkingLevel: "high" },
+    { id: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)", thinkingLevel: "medium" },
+    { id: "gemini-4-argon-low", name: "Gemini 4 Argon (Low)", thinkingLevel: "low" },
+    { id: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)", thinkingLevel: "high" },
+    { id: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)", thinkingLevel: "medium" },
+    { id: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)", thinkingLevel: "low" },
+    // Hydrogen is the only model with a fourth level; Antigravity labels it
+    // "Extra" in the picker and `xhigh` in the CLI (`--effort xhigh`).
+    { id: "gemini-4-hydrogen-xhigh", name: "Gemini 4 Hydrogen (XHigh)", thinkingLevel: "xhigh" },
+    // Internal alias Google still serves for Hydrogen; kept so existing callers and
+    // combos that already name it keep working.
+    { id: "gemini-4-hydrogen-sonar", name: "Gemini 4 Hydrogen (Sonar)" },
     // 0.5.169 — the 3.8 tiers had NO upstreamModelId while 3.7 and 3.6 right below did,
     // so they were sent to Google verbatim and every one 404'd. A live
     // v1internal:fetchAvailableModels for a real account serves ONE id for this family,

@@ -40,7 +40,11 @@ describe("getAntigravityProfileHeaders", () => {
   it("ide profile sets X-Client-Name=antigravity", () => {
     const h = getAntigravityProfileHeaders("ide", token);
     expect(h["X-Client-Name"]).toBe("antigravity");
-    expect(h["User-Agent"]).toBe("antigravity");
+    // 2026-11-17 — the ide profile used to send the bare word "antigravity". That UA is
+    // what TRUNCATES the model roster: v1internal:fetchAvailableModels answers with 21
+    // ids and no Gemini 4 at all, whereas the real desktop app UA returns 34 including
+    // Argon and Hydrogen. The profile now carries the full app string.
+    expect(h["User-Agent"]).toMatch(/^antigravity\/\d+\.\d+\.\d+\.0 \(aidev_client; os_type=.+; arch=.+; cl=\d+\)$/);
     expect(h["Authorization"]).toBe(`Bearer ${token}`);
   });
 

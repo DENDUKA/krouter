@@ -46,7 +46,15 @@ const CLAUDE_NO_XHIGH = ["none", "low", "medium", "high", "max"];
 
 // Model-name pattern overrides (glob, first match wins) — more precise than format default.
 const PATTERN_THINKING = [
-  // Gemini 4 (Argon) rejects "minimal" with 400 — LOW is the floor; cannot disable thinking.
+  // Gemini 4 rejects "minimal" with 400 — LOW is the floor; thinking cannot be disabled.
+  // 2026-11-17 — Hydrogen is the exception: it has a fourth level, labelled "Extra"
+  // in the Antigravity picker and `xhigh` in its CLI (`--effort xhigh`). Probed live
+  // against the real enum: LOW/MEDIUM/HIGH/EXTRA_HIGH return 200, MINIMAL and XHIGH
+  // are 400 ("not supported" / "unsupported"). kRouter's internal name for that
+  // fourth level is "xhigh", and it is sent on the wire as EXTRA_HIGH — see the
+  // antigravity executor's thinkingLevel mapping. Must stay ABOVE the *gemini-4*
+  // row below: PATTERN_THINKING is first-match-wins.
+  { pattern: "*gemini-4*hydrogen*", levels: ["low", "medium", "high", "xhigh"] },
   { pattern: "*gemini-4*", levels: ["low", "medium", "high"] },
   { pattern: "*claude*4.6*", levels: CLAUDE_NO_XHIGH },
   { pattern: "*claude*4-6*", levels: CLAUDE_NO_XHIGH },

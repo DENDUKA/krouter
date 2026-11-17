@@ -46,8 +46,14 @@ const RUNTIME_ARCH = (() => {
   }
 })();
 
+// 2026-11-17 — pinned to the desktop app build the header format is copied from.
+// The full `aidev_client` User-Agent (see appConstants.getAntigravityUserAgent)
+// is what unlocks the Gemini 4 roster; the short forms below are only kept for
+// the non-chat profiles, which never list models.
+export const ANTIGRAVITY_APP_VERSION = "2.32.1";
+
 // Stable per-process version. Pull from package.json if available.
-let _cachedVersion = "1.0.0";
+let _cachedVersion = ANTIGRAVITY_APP_VERSION;
 export function setAntigravityCachedVersion(v) {
   if (typeof v === "string" && v.length > 0) _cachedVersion = v;
 }
@@ -59,9 +65,9 @@ function ideHeaders(accessToken) {
   return {
     "Authorization": `Bearer ${accessToken}`,
     "Content-Type": "application/json",
-    "User-Agent": "antigravity",
+    "User-Agent": `antigravity/${ANTIGRAVITY_APP_VERSION}.0 (aidev_client; os_type=${RUNTIME_PLATFORM}; arch=${RUNTIME_ARCH}; cl=1003475615)`,
     "X-Client-Name": "antigravity",
-    "X-Client-Version": "1.107.0",
+    "X-Client-Version": ANTIGRAVITY_APP_VERSION,
     "x-request-source": "local",
   };
 }
@@ -70,9 +76,9 @@ function harnessHeaders(accessToken) {
   return {
     "Authorization": `Bearer ${accessToken}`,
     "Content-Type": "application/json",
-    "User-Agent": `antigravity/${_cachedVersion} ${RUNTIME_PLATFORM}/${RUNTIME_ARCH}`,
+    "User-Agent": `antigravity/${ANTIGRAVITY_APP_VERSION}.0 (aidev_client; os_type=${RUNTIME_PLATFORM}; arch=${RUNTIME_ARCH}; cl=1003475615)`,
     "X-Client-Name": "antigravity-harness",
-    "X-Client-Version": _cachedVersion,
+    "X-Client-Version": ANTIGRAVITY_APP_VERSION,
     "x-request-source": "local",
   };
 }
@@ -83,7 +89,7 @@ function creditProbeHeaders(accessToken) {
     "Content-Type": "application/json",
     "User-Agent": "antigravity-credit-probe",
     "X-Client-Name": "antigravity",
-    "X-Client-Version": "1.107.0",
+    "X-Client-Version": ANTIGRAVITY_APP_VERSION,
     "x-request-source": "local",
   };
 }

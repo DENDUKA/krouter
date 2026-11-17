@@ -311,6 +311,9 @@ export const PATTERN_CAPABILITIES = [
   // no reasoning, and thinking advertised as switchable. Argon answers thinkingLevel
   // "minimal" and any thinkingBudget with 400 — LOW/MEDIUM/HIGH only (upstream
   // 29fc880e). The 3.7/3.8 ladders are covered by *gemini-3* below with the same caps.
+  // 2026-11-17 — Hydrogen adds a fourth level (`xhigh`, sent as EXTRA_HIGH on the
+  // wire, "Extra" in the Antigravity picker); Argon/Carbon stay at three.
+  { pattern: "*gemini-4*hydrogen*", caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, thinkingLevels: ["low", "medium", "high", "xhigh"], contextWindow: 1048576, maxOutput: 65536 } },
   { pattern: "*gemini-4*",      caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65536 } },
   { pattern: "*gemini-3*pro*",  caps:{ vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65535 } },
   { pattern: "*gemini-3*",      caps: { vision: true, audioInput: true, videoInput: true, reasoning: true, search: true, thinkingFormat: "gemini-level", thinkingCanDisable: false, contextWindow: 1048576, maxOutput: 65536 } },
