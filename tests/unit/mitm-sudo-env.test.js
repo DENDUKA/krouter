@@ -126,7 +126,11 @@ describe("sudo spawn shape", () => {
 });
 
 describe("liveness of a root-owned MITM", () => {
-  it("treats EPERM as alive — the server runs as root", () => {
+  // Windows has no pid 1 to probe and kill() reports a different code, so both
+  // halves of this premise (the source check reads fine, the runtime guard does
+  // not) are Unix-only. Skipping is honest: on Windows the EPERM branch the
+  // test protects is unreachable, so there is nothing there to regress.
+  it.skipIf(process.platform === "win32")("treats EPERM as alive — the server runs as root", () => {
     // pid 1 exists and is not ours, so process.kill(1, 0) throws EPERM. The
     // check used to be for EACCES, which process.kill never throws: a root
     // MITM read as dead from the dashboard process, which then reported "not
@@ -166,13 +170,17 @@ describe("the shell half of the handshake", () => {
 
   const env = { HOME: "/Users/x", ROUTER_API_KEY: "sk-abc", MITM_FILE_LOG: "1" };
 
-  it("exports the vars when sudo consumed the password line", () => {
+  // The script under test is POSIX sh (run with /bin/sh, reads env with IFS= read)
+  // and the sudo handshake only exists on Unix — Windows has no /bin/sh and this
+  // path is never taken there. Skipping keeps the suite green without weakening
+  // the check wherever the code actually runs.
+  it.skipIf(process.platform === "win32")("exports the vars when sudo consumed the password line", () => {
     const payload = mgr.buildSudoEnvStdin("pw", env);
     // Drop the password line, as a prompting sudo would.
     expect(run(payload.slice(payload.indexOf("\n") + 1))).toBe("/Users/x|sk-abc|1");
   });
 
-  it("exports the same vars when sudo did NOT prompt", () => {
+  it.skipIf(process.platform === "win32")("exports the same vars when sudo did NOT prompt", () => {
     // Cached timestamp or NOPASSWD: the password line is still on stdin. A
     // script taking the first line blindly would export the password as the
     // API key and fail in a way that reads like a bad key.

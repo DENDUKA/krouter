@@ -363,8 +363,15 @@ describe("the data dir is resolved in four places, and they agree", () => {
     // Any new private copy fails here. The two forms are the two that existed:
     // process.env.DATA_DIR, and env.DATA_DIR where env is a parameter.
     const allowed = new Set([...CANONICAL.keys(), ...HAND_WRITTEN.map((c) => c.file)]);
+    // The allowlist above is written with forward slashes because that is how the
+    // repo spells these paths everywhere else (imports, docs, git). path.relative
+    // returns the PLATFORM separator, so on Windows every entry came back as
+    // "src\lib\dataDir.js", matched nothing, and the test flagged all five known
+    // resolvers as rogue copies. Normalise before comparing — the assertion is
+    // about which files resolve DATA_DIR, not about how the OS spells a path.
+    const toPosix = (p) => p.split(path.sep).join("/");
     const extra = sourceFiles(["src", "cli", "scripts"])
-      .map((f) => path.relative(process.cwd(), f))
+      .map((f) => toPosix(path.relative(process.cwd(), f)))
       .filter((rel) => !allowed.has(rel))
       .filter((rel) => /(?:process\.)?\benv\.DATA_DIR\b/.test(readFileSync(path.resolve(rel), "utf8")));
     expect(

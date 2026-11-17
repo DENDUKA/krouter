@@ -76,8 +76,18 @@ describe("IS_DEFAULT_DATA_DIR tells the two cases apart", () => {
   });
 
   it("DATA_DIR set to the same directory is still the default", () => {
-    // Setting it explicitly to ~/.krouter is not a second instance.
-    expect(isDefaultWith(path.join(os.homedir(), ".krouter"))).toBe(true);
+    // Setting it explicitly to the DEFAULT data dir is not a second instance.
+    // Ask the resolver what that dir is instead of hard-coding ~/.krouter: on
+    // Windows paths.js resolves it under %APPDATA%\krouter, so the literal Unix
+    // path was a DIFFERENT directory there and the assertion could never pass.
+    // The behaviour under test — "explicitly naming the default is still the
+    // default" — is unchanged; only the spelling of "the default" is portable.
+    const defaultDir = JSON.parse(
+      execFileSync(process.execPath, ["-e",
+        'process.stdout.write(JSON.stringify(process.platform === "win32" ? require("path").join(process.env.APPDATA || require("path").join(require("os").homedir(), "AppData", "Roaming"), "krouter") : require("path").join(require("os").homedir(), ".krouter")))',
+      ], { encoding: "utf8" }),
+    );
+    expect(isDefaultWith(defaultDir)).toBe(true);
   });
 
   it("a scratch DATA_DIR is NOT the default", () => {
