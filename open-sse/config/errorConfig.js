@@ -51,7 +51,7 @@ export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 // its real reset, bounded at 6h so a wrong upstream estimate can't strand an
 // account longer than a quarter-day. Per-model only — other models on the same
 // account stay usable. TPM (per-minute) 429s are downgraded to ~90s separately.
-export const MAX_QUOTA_RESET_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+export const MAX_QUOTA_RESET_COOLDOWN_MS = 60 * 60 * 1000; // 1h cap (was 6h): single-account pool cannot afford quarter-day model locks
 
 // Cooldown for Google "Verify your account" 403. The whole account needs human
 // intervention — lock ALL models on the account for 1hr so no further requests
