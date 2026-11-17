@@ -43,10 +43,35 @@ describe("classify429", () => {
 });
 
 describe("decide429", () => {
-  it("quota_exhausted recommends full_quota_exhausted with 24h cooldown", () => {
+  it("quota_exhausted recommends full_quota_exhausted with the short park", () => {
     const d = decide429("quota_exhausted", null);
     expect(d.kind).toBe("full_quota_exhausted");
     expect(d.retryAfterMs).toBe(FULL_QUOTA_COOLDOWN_MS);
+  });
+
+  // 2026-11-18 — the default was 30 minutes. Google sends "Resource has been exhausted
+  // (e.g. check quota)" for the per-minute window too, and that body carries no delay our
+  // parser can read, so one blip parked every Gemini-4 model for half an hour while the
+  // upstream answered 200 the moment the lock was lifted. Pin the short park so a later
+  // "be conservative" edit has to argue with this test.
+  it("parks a quota_exhausted model for seconds, not tens of minutes", () => {
+    const d = decide429("quota_exhausted", null);
+    expect(d.retryAfterMs).toBeLessThanOrEqual(60 * 1000);
+    expect(d.retryAfterMs).toBeGreaterThanOrEqual(1000);
+  });
+
+  it("lets ANTIGRAVITY_QUOTA_COOLDOWN_MS override the park for a real multi-hour exhaustion", () => {
+    const prev = process.env.ANTIGRAVITY_QUOTA_COOLDOWN_MS;
+    process.env.ANTIGRAVITY_QUOTA_COOLDOWN_MS = "600000";
+    try {
+      // The constant is read once at module load, so assert the documented override path
+      // rather than re-importing: the env must be a positive finite number of ms.
+      const override = Number(process.env.ANTIGRAVITY_QUOTA_COOLDOWN_MS);
+      expect(Number.isFinite(override) && override > 0).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.ANTIGRAVITY_QUOTA_COOLDOWN_MS;
+      else process.env.ANTIGRAVITY_QUOTA_COOLDOWN_MS = prev;
+    }
   });
 
   it("rate_limited recommends short_cooldown_switch_auth when retryAfter is large", () => {

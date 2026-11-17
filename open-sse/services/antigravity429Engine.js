@@ -42,7 +42,29 @@ const CREDITS_EXHAUSTED_KEYWORDS = [
 ];
 
 const SHORT_COOLDOWN_MS = 5 * 60 * 1000;
-const FULL_QUOTA_COOLDOWN_MS = 30 * 60 * 1000; // 30m default (was 24h): unparsed reset no longer strands the account for a day
+
+// 2026-11-18 — 30min → 20s. Google's `Resource has been exhausted (e.g. check quota)`
+// on Antigravity is NOT proof that the daily quota is gone. Measured on the prod
+// account: the dashboard read 100% on every bucket while the router kept answering
+// 503, and clearing modelLock_gemini-4-hydrogen-medium from the connection made the
+// very next request return 200 in under a second. The message is the same body Google
+// ships for the per-minute window, and `parseRetryFromErrorMessage` cannot extract a
+// delay from it (no "resets in" phrase, no bare duration), so it used to fall through
+// to this constant.
+//
+// At 30 minutes one blip parked every Gemini-4 model — the whole curated roster shares
+// a single antigravity connection — for half an hour, which read as "the site is down"
+// while the upstream was healthy. Twenty seconds is longer than the 10s TPM park below
+// (this path means a real 429 came back, not a suspected burst) and short enough that a
+// genuinely dead window is retried within the same minute instead of being written off.
+// Override with ANTIGRAVITY_QUOTA_COOLDOWN_MS when a real multi-hour exhaustion appears.
+const DEFAULT_QUOTA_COOLDOWN_MS = 20 * 1000;
+const FULL_QUOTA_COOLDOWN_MS = (() => {
+  // `typeof process` guard: this module is also pulled into the dashboard graph, where
+  // a bare process.env would throw in the browser anyway.
+  const env = typeof process !== "undefined" ? Number(process.env?.ANTIGRAVITY_QUOTA_COOLDOWN_MS) : NaN;
+  return Number.isFinite(env) && env > 0 ? env : DEFAULT_QUOTA_COOLDOWN_MS;
+})();
 const INSTANT_RETRY_THRESHOLD_MS = 3 * 1000;
 
 export function classify429(errorMessage) {
