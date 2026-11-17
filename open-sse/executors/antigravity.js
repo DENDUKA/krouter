@@ -304,12 +304,24 @@ export class AntigravityExecutor extends BaseExecutor {
     // Matches what the real Antigravity native client picks based on token.
     const envelopeUA = getAntigravityEnvelopeUserAgent(credentials);
 
-    // 0.5.166 — the official Antigravity client omits `requestType` entirely on
-    // the agent (chat) path. Sending `requestType: "agent"` — set here, or leaked
-    // through the ...body spread below from an inbound IDE/MITM envelope — makes
-    // Google bucket the request and answer a detail-free 429 RESOURCE_EXHAUSTED
-    // even with quota available (upstream 5798b308). The `image_gen` bucket is a
-    // different one and keeps its requestType (returned above).
+    // 0.5.166 removed `requestType` on the chat path because "agent" was believed
+    // to cause a detail-free 429 RESOURCE_EXHAUSTED (upstream 5798b308).
+    //
+    // 2026-11-17 — that reason is WRONG for the current client, and the measurement
+    // is worth spelling out so nobody re-derives it. A live mitmproxy capture of the
+    // real Antigravity 2.32.1 desktop app shows it DOES send `requestType: "agent"`
+    // on the agent path and gets 200. Direct A/B against Google with everything else
+    // identical (same token, session id, model, thinking config):
+    //
+    //   hydrogen  without requestType  3.7s / 4.1s / 7.5s   all 200
+    //   hydrogen  with    requestType 19.4s / 11.6s / 15.2s all 200
+    //   argon     without requestType  6.2s / 8.2s          all 200
+    //   argon     with    requestType  5.8s / 20.1s         all 200
+    //
+    // So "agent" is accepted, never 429s — but it costs 2-3x latency on every call.
+    // The delete STAYS (it is a latency win, not a correctness fix); only the
+    // stated rationale changes. The `image_gen` bucket keeps its requestType
+    // (returned above), and an inbound envelope through MITM still gets it stripped.
     delete body.requestType;
 
     return {

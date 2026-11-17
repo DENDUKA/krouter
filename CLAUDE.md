@@ -65,3 +65,26 @@ stream. It does not — 2 and 3 parallel streams all returned 200 (20-37 s each)
 now allows 2, with `SEMAPHORE_TIMEOUT_DEFAULTS.antigravity = 90_000` so a waiter outlasts the
 60-100 s streams instead of surfacing `503 Account busy, try another`.
 
+## `requestType: "agent"` — accepted, but costs 2-3x latency (2026-11-17)
+
+`transformRequest` deletes `requestType` on the chat path. That delete used to be justified by
+"it causes a detail-free 429" (upstream 5798b308). **The justification was wrong**; the delete
+itself is still right, for a different reason.
+
+Evidence, from a mitmproxy capture of the real Antigravity 2.32.1 desktop app plus a direct
+A/B against Google (same token, session id, model and thinking config; only `requestType`
+varied):
+
+- the app **does** send `requestType: "agent"` and gets 200 — so it never was a 429 trigger;
+- `hydrogen` without it: 3.7 / 4.1 / 7.5 s · with it: 19.4 / 11.6 / 15.2 s — all 200;
+- `argon` without it: 6.2 / 8.2 s · with it: 5.8 / 20.1 s — all 200.
+
+So it is a **latency penalty of roughly 2-3x**, not a refusal. Keep stripping it, but do not
+quote the 429 story again — it sends the next reader hunting a quota bug that is not there.
+
+The same capture settles what else the app sends and we do not: `request.labels` (cascade /
+trajectory / `model_enum` telemetry), 16 `tools`, and a ~40 KB `systemInstruction`. Those are
+size differences, not format defects — our body is small because the client prompt is small.
+It does mean the router has never been exercised under the app's real payload, which is the
+regime where the prompt content filter (above) actually bites.
+
