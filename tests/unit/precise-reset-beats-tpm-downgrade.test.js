@@ -51,13 +51,31 @@ describe("markAccountUnavailable: precise reset vs TPM downgrade", () => {
   });
   afterEach(() => vi.useRealTimers());
 
-  it("follows a resetsAtMs 3h out instead of the 90s TPM lock", async () => {
+  it("follows a resetsAtMs 3h out instead of the TPM lock, capped at 1h", async () => {
+    // 2026-11-17 — the cap moved 6h -> 1h (upstream a40f2cee): with a single
+    // antigravity account an unparsed reset used to lock the model for
+    // MAX_QUOTA_RESET_COOLDOWN_MS while Google really resets in ~20 min, which
+    // stranded the whole pool. So the point of THIS test is narrower now: a
+    // precise upstream reset still beats the TPM downgrade, and it is honoured
+    // up to the cap rather than dropped. 3h of requested reset therefore lands
+    // at 1h, not 3h — and it must NOT collapse to the 10s TPM park.
     db.rows.cx1 = { id: "cx1", provider: "codex" };
     const out = await markAccountUnavailable("cx1", 429, "Rate limit reached for gpt-5.5", "codex", "gpt-5.5", NOW + 3 * HOUR);
     expect(out.shouldFallback).toBe(true);
-    expect(out.cooldownMs).toBe(3 * HOUR);
-    expect(lockMs(db.rows.cx1, "gpt-5.5")).toBe(3 * HOUR);
+    expect(out.cooldownMs).toBe(MAX_QUOTA_RESET_COOLDOWN_MS);
+    expect(lockMs(db.rows.cx1, "gpt-5.5")).toBe(MAX_QUOTA_RESET_COOLDOWN_MS);
+    // Still unmistakably not the TPM path.
+    expect(out.cooldownMs).toBeGreaterThan(10 * 1000);
     expect(db.rows.cx1.lastError).not.toMatch(/TPM/);
+  });
+
+  it("honours a reset that already sits inside the cap", async () => {
+    // The half a 3h-out case can no longer show: a reset BELOW the cap is used
+    // verbatim, so the cap is a ceiling and not a flat replacement.
+    db.rows.cx3 = { id: "cx3", provider: "codex" };
+    const out = await markAccountUnavailable("cx3", 429, "Rate limit reached for gpt-5.5", "codex", "gpt-5.5", NOW + 20 * 60 * 1000);
+    expect(out.cooldownMs).toBe(20 * 60 * 1000);
+    expect(lockMs(db.rows.cx3, "gpt-5.5")).toBe(20 * 60 * 1000);
   });
 
   it("still caps a far-away reset at MAX_QUOTA_RESET_COOLDOWN_MS", async () => {

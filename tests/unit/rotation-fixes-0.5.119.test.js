@@ -10,19 +10,29 @@ const HOUR = 60 * 60 * 1000;
 const MIN = 60 * 1000;
 
 describe("0.5.119 A3 — park daily-exhausted accounts until real reset", () => {
-  it("quota-reset cap is 6h (was 30m rate-limit cap)", () => {
-    expect(MAX_QUOTA_RESET_COOLDOWN_MS).toBe(6 * HOUR);
+  // 2026-11-17 — the cap was lowered 6h -> 1h on purpose (upstream a40f2cee).
+  // The lesson of A3 still holds and is what these tests protect: an unparsed
+  // reset must NOT collapse to the 30-minute rate-limit cap. But 6h turned out
+  // to be far too long for a single-account pool, where Google actually resets
+  // in ~20 minutes; a 6h lock stranded the only credential. So assert the
+  // relationship, not the historical literal — the literal lives in exactly one
+  // place (errorConfig.js) and pinning it twice is how this test went stale.
+  it("quota-reset cap sits above the rate-limit cap", () => {
+    expect(MAX_QUOTA_RESET_COOLDOWN_MS).toBe(HOUR); // 1h since a40f2cee
     expect(MAX_QUOTA_RESET_COOLDOWN_MS).toBeGreaterThan(MAX_RATE_LIMIT_COOLDOWN_MS);
+    // Still not the old broken behaviour.
+    expect(MAX_QUOTA_RESET_COOLDOWN_MS).not.toBe(30 * MIN);
   });
 
-  it('a 104h "Resets in" is parked 6h, not 30 min', () => {
+  it('a 104h "Resets in" is capped, never flattened to 30 min', () => {
     const resetsInMs = 104 * HOUR; // Antigravity "Resets in 104h25m37s"
     const cooldown = Math.min(resetsInMs, MAX_QUOTA_RESET_COOLDOWN_MS);
-    expect(cooldown).toBe(6 * HOUR);
+    expect(cooldown).toBe(MAX_QUOTA_RESET_COOLDOWN_MS);
+    expect(cooldown).toBe(HOUR);
     expect(cooldown).not.toBe(30 * MIN); // the old, broken behavior
   });
 
-  it("a genuine sub-6h reset is honored exactly (not inflated)", () => {
+  it("a genuine sub-cap reset is honored exactly (not inflated)", () => {
     const resetsInMs = 45 * MIN;
     expect(Math.min(resetsInMs, MAX_QUOTA_RESET_COOLDOWN_MS)).toBe(45 * MIN);
   });
